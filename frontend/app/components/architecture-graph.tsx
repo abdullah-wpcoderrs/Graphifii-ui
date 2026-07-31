@@ -1,0 +1,245 @@
+"use client";
+
+import {
+  Background,
+  BackgroundVariant,
+  Controls,
+  MarkerType,
+  MiniMap,
+  ReactFlow,
+  type Edge,
+  type Node,
+  type NodeMouseHandler,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { useMemo, useState } from "react";
+import {
+  WORKSPACE_GRAPH_EDGES,
+  WORKSPACE_GRAPH_NODES,
+  type WorkspaceGraphNode,
+} from "../lib/workspace-fixtures";
+
+type ArchitectureGraphProps = {
+  activeFilePath: string;
+  onSelectNode: (node: WorkspaceGraphNode) => void;
+  selectedNodeId: string | null;
+};
+
+export default function ArchitectureGraph({
+  activeFilePath,
+  onSelectNode,
+  selectedNodeId,
+}: ArchitectureGraphProps) {
+  const [query, setQuery] = useState("");
+  const [kind, setKind] = useState<"all" | WorkspaceGraphNode["kind"]>("all");
+  const [community, setCommunity] = useState("all");
+  const [showEdges, setShowEdges] = useState(true);
+
+  const communities = useMemo(
+    () => Array.from(new Set(WORKSPACE_GRAPH_NODES.map((node) => node.community))),
+    [],
+  );
+
+  const visibleGraphNodes = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    return WORKSPACE_GRAPH_NODES.filter((node) => {
+      const matchesQuery =
+        !normalizedQuery ||
+        node.label.toLocaleLowerCase().includes(normalizedQuery) ||
+        node.filePath.toLocaleLowerCase().includes(normalizedQuery);
+      const matchesKind = kind === "all" || node.kind === kind;
+      const matchesCommunity =
+        community === "all" || node.community === community;
+      return matchesQuery && matchesKind && matchesCommunity;
+    });
+  }, [community, kind, query]);
+
+  const visibleIds = useMemo(
+    () => new Set(visibleGraphNodes.map((node) => node.id)),
+    [visibleGraphNodes],
+  );
+
+  const nodes = useMemo<Node[]>(
+    () =>
+      visibleGraphNodes.map((node) => {
+        const isSelected = selectedNodeId === node.id;
+        const matchesFile = activeFilePath === node.filePath;
+        const isGodNode = node.centrality === "god";
+
+        return {
+          id: node.id,
+          position: { x: node.x, y: node.y },
+          data: {
+            label: (
+              <div className="graph-node-content">
+                <span>{node.kind}</span>
+                <strong>{node.label}</strong>
+                <code>{node.filePath}</code>
+              </div>
+            ),
+          },
+          className: [
+            "graph-node",
+            isGodNode ? "is-god-node" : "",
+            isSelected ? "is-selected" : "",
+            matchesFile ? "matches-file" : "",
+          ]
+            .filter(Boolean)
+            .join(" "),
+          style: {
+            width: 154,
+          },
+        };
+      }),
+    [activeFilePath, selectedNodeId, visibleGraphNodes],
+  );
+
+  const edges = useMemo<Edge[]>(
+    () =>
+      showEdges
+        ? WORKSPACE_GRAPH_EDGES.filter(
+            (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
+          ).map((edge) => ({
+            ...edge,
+            animated: edge.source === selectedNodeId,
+            markerEnd: { type: MarkerType.ArrowClosed },
+            className: "graph-edge",
+            labelStyle: { fill: "#71717a", fontSize: 8 },
+            style: { stroke: "#3f3f46", strokeWidth: 1.2 },
+          }))
+        : [],
+    [selectedNodeId, showEdges, visibleIds],
+  );
+
+  const handleNodeClick: NodeMouseHandler = (_, flowNode) => {
+    const sourceNode = WORKSPACE_GRAPH_NODES.find(
+      (node) => node.id === flowNode.id,
+    );
+    if (sourceNode) onSelectNode(sourceNode);
+  };
+
+  const selectedNode = WORKSPACE_GRAPH_NODES.find(
+    (node) => node.id === selectedNodeId,
+  );
+
+  return (
+    <div className="architecture-graph">
+      <div className="graph-toolbar">
+        <label className="graph-search">
+          <span className="sr-only">Search architecture graph</span>
+          <svg aria-hidden="true" viewBox="0 0 20 20">
+            <circle cx="8.5" cy="8.5" r="5.5" />
+            <path d="m12.5 12.5 4 4" />
+          </svg>
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search nodes"
+            type="search"
+          />
+        </label>
+        <select
+          aria-label="Filter graph by node type"
+          value={kind}
+          onChange={(event) =>
+            setKind(event.target.value as "all" | WorkspaceGraphNode["kind"])
+          }
+        >
+          <option value="all">All types</option>
+          <option value="module">Modules</option>
+          <option value="class">Classes</option>
+          <option value="function">Functions</option>
+        </select>
+        <select
+          aria-label="Filter graph by community"
+          value={community}
+          onChange={(event) => setCommunity(event.target.value)}
+        >
+          <option value="all">All communities</option>
+          {communities.map((item) => (
+            <option value={item} key={item}>
+              {item}
+            </option>
+          ))}
+        </select>
+        <button
+          className={showEdges ? "is-active" : ""}
+          type="button"
+          onClick={() => setShowEdges((value) => !value)}
+        >
+          Edges
+        </button>
+      </div>
+
+      <div className="graph-canvas">
+        {nodes.length > 0 ? (
+          <ReactFlow
+            colorMode="dark"
+            edges={edges}
+            fitView
+            fitViewOptions={{ padding: 0.24 }}
+            minZoom={0.35}
+            nodes={nodes}
+            nodesDraggable
+            nodesConnectable={false}
+            onNodeClick={handleNodeClick}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background
+              color="#27272a"
+              gap={22}
+              size={1}
+              variant={BackgroundVariant.Dots}
+            />
+            <MiniMap
+              className="graph-minimap"
+              maskColor="rgb(9 9 11 / 72%)"
+              nodeColor={(node) =>
+                node.className?.includes("is-god-node") ? "#8b5cf6" : "#3f3f46"
+              }
+              pannable
+              zoomable
+            />
+            <Controls className="graph-controls" showInteractive={false} />
+          </ReactFlow>
+        ) : (
+          <div className="graph-empty">
+            <strong>No graph nodes match.</strong>
+            <p>Clear a search or filter to restore the architecture view.</p>
+            <button
+              type="button"
+              onClick={() => {
+                setQuery("");
+                setKind("all");
+                setCommunity("all");
+              }}
+            >
+              Reset graph filters
+            </button>
+          </div>
+        )}
+      </div>
+
+      {selectedNode && (
+        <aside className="graph-inspector" aria-label="Selected graph node">
+          <div>
+            <span>{selectedNode.kind}</span>
+            <strong>{selectedNode.label}</strong>
+          </div>
+          <dl>
+            <div>
+              <dt>Community</dt>
+              <dd>{selectedNode.community}</dd>
+            </div>
+            <div>
+              <dt>Source</dt>
+              <dd>
+                {selectedNode.filePath}:{selectedNode.line}
+              </dd>
+            </div>
+          </dl>
+        </aside>
+      )}
+    </div>
+  );
+}
