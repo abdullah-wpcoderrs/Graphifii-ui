@@ -45,3 +45,6 @@ paper/
 
 # macOS Finder metadata
 .DS_Store
+
+# Sandbox artifact uploads (Phase 4) — per-project graph.json/files.json
+workspace-storage/

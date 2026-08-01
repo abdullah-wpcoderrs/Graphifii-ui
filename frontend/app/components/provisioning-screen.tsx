@@ -2,8 +2,16 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { PROVISIONING_PHASES } from "../lib/workspace-fixtures";
+import { useEffect, useRef, useState } from "react";
+import {
+  cancelProject,
+  fetchProject,
+  launchProject,
+  type LaunchProgress,
+  type Project,
+  type ProjectStatus,
+} from "../lib/api";
+import { getPublicWsUrl } from "../lib/env";
 import { BrandLockup } from "./brand-lockup";
 
 type ProvisioningScreenProps = {
@@ -11,83 +19,253 @@ type ProvisioningScreenProps = {
   projectId: string;
 };
 
-type ProvisioningStatus = "running" | "failed" | "ready";
+type ConnectionState = "connecting" | "open" | "closed";
 
-function formatElapsed(seconds: number) {
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${minutes.toString().padStart(2, "0")}:${remainder
+type TimelineEvent = {
+  id: string;
+  at: number;
+  label: string;
+};
+
+const STATUS_PHASES: {
+  id: ProjectStatus;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "CLONING",
+    label: "Cloning repository",
+    description: "Fetching the repository into an isolated sandbox.",
+  },
+  {
+    id: "INDEXING",
+    label: "Building the graph",
+    description: "Parsing source, extracting symbols, calls, and communities.",
+  },
+];
+
+const MAX_BACKOFF_MS = 10_000;
+const READY_REDIRECT_DELAY_MS = 1200;
+
+function formatElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes.toString().padStart(2, "0")}:${seconds
     .toString()
     .padStart(2, "0")}`;
 }
 
-export function ProvisioningScreen({
-  initialFailure,
-  projectId,
-}: ProvisioningScreenProps) {
+function providerFromRepoUrl(url: string): "github" | "gitlab" | "gitbucket" {
+  try {
+    const host = new URL(url).hostname;
+    if (host.includes("gitlab")) return "gitlab";
+    if (host.includes("github")) return "github";
+    return "gitbucket";
+  } catch {
+    return "github";
+  }
+}
+
+export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
   const router = useRouter();
-  const [status, setStatus] = useState<ProvisioningStatus>(
-    initialFailure ? "failed" : "running",
-  );
-  const [phaseIndex, setPhaseIndex] = useState(initialFailure ? 3 : 0);
-  const [elapsed, setElapsed] = useState(initialFailure ? 47 : 0);
-  const latestSequence = useRef(initialFailure ? 3 : 0);
-  const currentPhase = PROVISIONING_PHASES[phaseIndex];
-  const redirecting = status === "ready";
+  const [project, setProject] = useState<Project | null>(null);
+  const [progress, setProgress] = useState<LaunchProgress | null>(null);
+  const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [fatalError, setFatalError] = useState<string | null>(null);
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
+  const [now, setNow] = useState(() => Date.now());
+  const [retrying, setRetrying] = useState(false);
+  const [canceling, setCanceling] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+
+  const startedAtRef = useRef(Date.now());
+  const socketRef = useRef<WebSocket | null>(null);
+  const retryTimerRef = useRef<number | null>(null);
+  const backoffRef = useRef(1000);
+  const mountedRef = useRef(true);
+  const redirectedRef = useRef(false);
+  const lastStatusRef = useRef<ProjectStatus | null>(null);
+  const lastMessageRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (status !== "running") return;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
-    const elapsedTimer = window.setInterval(() => {
-      setElapsed((value) => value + 1);
-    }, 1000);
+  useEffect(() => {
+    fetchProject(projectId)
+      .then((value) => {
+        if (mountedRef.current) setProject(value);
+      })
+      .catch(() => {
+        // Non-fatal — the header falls back to a generic label.
+      });
+  }, [projectId, attempt]);
 
-    const phaseTimer = window.setInterval(() => {
-      const nextSequence = latestSequence.current + 1;
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
-      if (nextSequence >= PROVISIONING_PHASES.length) {
-        setStatus("ready");
-        window.clearInterval(phaseTimer);
-        return;
-      }
+  function appendEvent(label: string) {
+    setEvents((current) =>
+      [{ id: `${Date.now()}-${current.length}`, at: Date.now(), label }, ...current].slice(
+        0,
+        40,
+      ),
+    );
+  }
 
-      latestSequence.current = nextSequence;
-      setPhaseIndex(nextSequence);
-    }, 1250);
+  useEffect(() => {
+    const wsBase = getPublicWsUrl();
+    if (!wsBase) {
+      setFatalError("The backend API URL is not configured.");
+      return;
+    }
+
+    let cancelled = false;
+
+    function connect() {
+      if (cancelled) return;
+      setConnection("connecting");
+      const socket = new WebSocket(`${wsBase}/ws/projects/${projectId}`);
+      socketRef.current = socket;
+
+      socket.onopen = () => {
+        if (cancelled) return;
+        setConnection("open");
+        backoffRef.current = 1000;
+      };
+
+      socket.onmessage = (event) => {
+        if (cancelled) return;
+        let payload: LaunchProgress;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return; // Ignore a malformed frame rather than tearing down the connection.
+        }
+
+        if (payload.status !== lastStatusRef.current) {
+          appendEvent(payload.message ?? `Status changed to ${payload.status}`);
+        } else if (payload.message && payload.message !== lastMessageRef.current) {
+          appendEvent(payload.message);
+        }
+        lastStatusRef.current = payload.status;
+        lastMessageRef.current = payload.message;
+        setProgress(payload);
+      };
+
+      socket.onclose = (event) => {
+        if (cancelled) return;
+        setConnection("closed");
+
+        if (event.code === 4401) {
+          setFatalError("Your session has expired. Sign in again to continue.");
+          return;
+        }
+        if (event.code === 4403) {
+          setFatalError("Your account has been suspended.");
+          return;
+        }
+        if (event.code === 4404) {
+          setFatalError("This project no longer exists.");
+          return;
+        }
+        // A normal close after a terminal payload (READY/FAILED) is expected
+        // server behavior, not a dropped connection — don't reconnect for it.
+        if (event.code === 1000) return;
+
+        const delay = Math.min(backoffRef.current, MAX_BACKOFF_MS);
+        backoffRef.current = Math.min(backoffRef.current * 2, MAX_BACKOFF_MS);
+        retryTimerRef.current = window.setTimeout(connect, delay);
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
+    }
+
+    connect();
 
     return () => {
-      window.clearInterval(elapsedTimer);
-      window.clearInterval(phaseTimer);
+      cancelled = true;
+      if (retryTimerRef.current) window.clearTimeout(retryTimerRef.current);
+      socketRef.current?.close(1000);
+      socketRef.current = null;
     };
-  }, [status]);
+  }, [projectId, attempt]);
 
   useEffect(() => {
-    if (status !== "ready") return;
-
-    const redirectTimer = window.setTimeout(() => {
+    if (!progress || progress.status !== "READY" || redirectedRef.current) return;
+    redirectedRef.current = true;
+    const timer = window.setTimeout(() => {
       router.push(`/workspace/${projectId}`);
-    }, 1200);
+    }, READY_REDIRECT_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [progress, projectId, router]);
 
-    return () => window.clearTimeout(redirectTimer);
-  }, [projectId, router, status]);
-
-  const visibleEvents = useMemo(
-    () => PROVISIONING_PHASES.slice(0, phaseIndex + 1).reverse(),
-    [phaseIndex],
-  );
-
-  function retry() {
-    latestSequence.current = 0;
-    setPhaseIndex(0);
-    setElapsed(0);
-    setStatus("running");
+  async function handleCancel() {
+    setCanceling(true);
+    try {
+      await cancelProject(projectId);
+    } catch {
+      // The WebSocket stream reflects the real outcome either way.
+    } finally {
+      setCanceling(false);
+    }
   }
+
+  async function handleRetry() {
+    if (!project) return;
+    setRetrying(true);
+    try {
+      await launchProject({
+        repoFullName: project.repo_name,
+        repoUrl: project.repo_url,
+        provider: providerFromRepoUrl(project.repo_url),
+        defaultBranch: "main",
+      });
+      setEvents([]);
+      backoffRef.current = 1000;
+      redirectedRef.current = false;
+      lastStatusRef.current = null;
+      lastMessageRef.current = null;
+      startedAtRef.current = Date.now();
+      // The WS connection closed after the prior terminal FAILED frame —
+      // bump attempt to force the effect above to open a fresh socket.
+      setAttempt((value) => value + 1);
+    } catch (error) {
+      setFatalError(
+        error instanceof Error ? error.message : "Could not restart the extraction.",
+      );
+    } finally {
+      setRetrying(false);
+    }
+  }
+
+  const elapsed = now - startedAtRef.current;
+  const owner = project?.repo_name.split("/")[0] ?? null;
+  const name = project?.repo_name.split("/").slice(1).join("/") ?? null;
+
+  const phaseIndex = progress
+    ? STATUS_PHASES.findIndex((phase) => phase.id === progress.status)
+    : -1;
+  const currentPhase =
+    phaseIndex >= 0 ? STATUS_PHASES[phaseIndex] : STATUS_PHASES[0];
+  const isFailed = progress?.status === "FAILED";
+  const isReady = progress?.status === "READY";
+  const isRunning = Boolean(progress) && !isFailed && !isReady;
+  const displayPercent = progress?.progress_percent ?? 0;
 
   return (
     <main className="provisioning-page">
       <header className="provisioning-header">
         <BrandLockup priority />
-        <Link href="/dashboard">Back to repositories</Link>
+        <Link href="/repositories">Back to repositories</Link>
       </header>
 
       <div className="provisioning-shell">
@@ -102,36 +280,54 @@ export function ProvisioningScreen({
               <i />
             </span>
             <div>
-              <span>Graphify-Labs</span>
-              <strong>graphify</strong>
+              <span>{owner ?? "Loading repository…"}</span>
+              <strong>{name ?? ""}</strong>
             </div>
-            <code>main</code>
           </div>
 
-          {status === "failed" ? (
+          {fatalError ? (
+            <div className="provisioning-failure" role="alert">
+              <p className="provisioning-eyebrow">Connection lost</p>
+              <h1 id="provisioning-title">{fatalError}</h1>
+              <div className="provisioning-actions">
+                <Link href="/repositories">Return to repositories</Link>
+              </div>
+            </div>
+          ) : isFailed ? (
             <div className="provisioning-failure" role="alert">
               <p className="provisioning-eyebrow">Extraction interrupted</p>
-              <h1 id="provisioning-title">Parsing stopped on a source file.</h1>
+              <h1 id="provisioning-title">
+                {progress?.error ?? "Extraction stopped before it finished."}
+              </h1>
               <p>
-                The sandbox is still isolated, but Graphify has not persisted
-                partial graph artifacts. Retry the extraction or return to the
-                dashboard.
+                The sandbox is isolated and no partial graph artifacts were
+                persisted. Retry the extraction or return to repositories.
               </p>
-              <dl>
-                <div>
-                  <dt>Failed phase</dt>
-                  <dd>Parsing source files</dd>
-                </div>
-                <div>
-                  <dt>Safe reference</dt>
-                  <dd>EXT-8FA2</dd>
-                </div>
-              </dl>
+              {progress?.message && (
+                <dl>
+                  <div>
+                    <dt>Last status</dt>
+                    <dd>{progress.message}</dd>
+                  </div>
+                </dl>
+              )}
               <div className="provisioning-actions">
-                <button type="button" onClick={retry}>
-                  Retry extraction
+                <button
+                  type="button"
+                  disabled={retrying || !project}
+                  onClick={handleRetry}
+                >
+                  {retrying ? "Retrying…" : "Retry extraction"}
                 </button>
-                <Link href="/dashboard">Return to dashboard</Link>
+                <Link href="/repositories">Return to repositories</Link>
+              </div>
+            </div>
+          ) : !progress ? (
+            <div className="provisioning-heading">
+              <div>
+                <p className="provisioning-eyebrow">Connecting</p>
+                <h1 id="provisioning-title">Connecting to the sandbox…</h1>
+                <p>Waiting for the first progress update.</p>
               </div>
             </div>
           ) : (
@@ -139,15 +335,15 @@ export function ProvisioningScreen({
               <div className="provisioning-heading">
                 <div>
                   <p className="provisioning-eyebrow">
-                    {status === "ready"
-                      ? "Workspace ready"
-                      : "Provisioning workspace"}
+                    {isReady ? "Workspace ready" : "Provisioning workspace"}
                   </p>
-                  <h1 id="provisioning-title">{currentPhase.label}</h1>
+                  <h1 id="provisioning-title">
+                    {progress.message ?? currentPhase.label}
+                  </h1>
                   <p>{currentPhase.description}</p>
                 </div>
                 <strong className="provisioning-percent">
-                  {currentPhase.progress}
+                  {displayPercent}
                   <span>%</span>
                 </strong>
               </div>
@@ -158,15 +354,15 @@ export function ProvisioningScreen({
                 aria-label="Workspace provisioning progress"
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-valuenow={currentPhase.progress}
+                aria-valuenow={displayPercent}
               >
-                <span style={{ width: `${currentPhase.progress}%` }} />
+                <span style={{ width: `${displayPercent}%` }} />
               </div>
 
               <ol className="provisioning-phases">
-                {PROVISIONING_PHASES.map((phase, index) => {
-                  const isComplete = index < phaseIndex || status === "ready";
-                  const isActive = index === phaseIndex && status !== "ready";
+                {STATUS_PHASES.map((phase, index) => {
+                  const isComplete = index < phaseIndex || isReady;
+                  const isActive = index === phaseIndex && !isReady;
 
                   return (
                     <li
@@ -185,7 +381,19 @@ export function ProvisioningScreen({
                 })}
               </ol>
 
-              {redirecting && (
+              {isRunning && (
+                <div className="provisioning-actions">
+                  <button
+                    type="button"
+                    disabled={canceling}
+                    onClick={handleCancel}
+                  >
+                    {canceling ? "Canceling…" : "Cancel"}
+                  </button>
+                </div>
+              )}
+
+              {isReady && (
                 <p className="provisioning-redirect" role="status">
                   Opening the workspace…
                 </p>
@@ -198,7 +406,13 @@ export function ProvisioningScreen({
           <div className="provisioning-aside-header">
             <div>
               <span>Event log</span>
-              <strong>{status === "failed" ? "Paused" : "Live"}</strong>
+              <strong>
+                {isFailed || fatalError
+                  ? "Paused"
+                  : connection === "open"
+                    ? "Live"
+                    : "Reconnecting…"}
+              </strong>
             </div>
             <dl>
               <dt>Elapsed</dt>
@@ -207,21 +421,20 @@ export function ProvisioningScreen({
           </div>
 
           <div className="provisioning-events" aria-live="polite">
-            {visibleEvents.map((phase, index) => (
-              <article key={phase.id}>
-                <span className={index === 0 ? "is-current" : ""} />
-                <div>
-                  <time>{formatElapsed(Math.max(0, elapsed - index * 7))}</time>
-                  <p>{phase.event}</p>
-                </div>
-              </article>
-            ))}
+            {events.length === 0 ? (
+              <p className="provisioning-note">Waiting for the first event…</p>
+            ) : (
+              events.map((item, index) => (
+                <article key={item.id}>
+                  <span className={index === 0 ? "is-current" : ""} />
+                  <div>
+                    <time>{formatElapsed(item.at - startedAtRef.current)}</time>
+                    <p>{item.label}</p>
+                  </div>
+                </article>
+              ))
+            )}
           </div>
-
-          <p className="provisioning-note">
-            This view uses contract fixtures until the Railway WebSocket route
-            is available. Terminal states are handled exactly once.
-          </p>
         </aside>
       </div>
     </main>

@@ -2290,3 +2290,937 @@ button {
     width: 100%;
   }
 }
+
+/* ==========================================================================
+   Shared UI primitives (Button, Input, Badge, Spinner, ErrorState, EmptyState)
+   Used across authenticated screens (dashboard, repositories, integrations,
+   admin settings). Existing one-off classes (github-button, auth-error, etc.)
+   are left untouched to avoid regressions on already-shipped screens.
+   ========================================================================== */
+
+.ui-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  text-decoration: none;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    transform 160ms ease,
+    box-shadow 160ms ease,
+    opacity 160ms ease;
+}
+
+.ui-button-md {
+  min-height: 40px;
+  padding: 0 18px;
+  font-size: 13px;
+}
+
+.ui-button-sm {
+  min-height: 32px;
+  padding: 0 13px;
+  font-size: 12px;
+}
+
+.ui-button-primary {
+  border-color: rgb(255 255 255 / 7%);
+  background: var(--accent-emerald);
+  color: #06110d;
+}
+
+.ui-button-primary:hover:not(:disabled) {
+  border-color: rgb(255 255 255 / 14%);
+  background: #34d399;
+  box-shadow: 0 10px 32px rgb(16 185 129 / 16%);
+  transform: translateY(-1px);
+}
+
+.ui-button-primary:active:not(:disabled) {
+  background: var(--accent-emerald-strong);
+  transform: translateY(0);
+}
+
+.ui-button-secondary {
+  border-color: var(--border-subtle);
+  background: var(--bg-input);
+  color: var(--text-primary);
+}
+
+.ui-button-secondary:hover:not(:disabled) {
+  border-color: var(--border-focus);
+  background: #1f1f23;
+}
+
+.ui-button-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.ui-button-ghost:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: rgb(255 255 255 / 4%);
+}
+
+.ui-button-danger {
+  border-color: rgb(248 113 113 / 25%);
+  background: rgb(248 113 113 / 8%);
+  color: #fca5a5;
+}
+
+.ui-button-danger:hover:not(:disabled) {
+  border-color: rgb(248 113 113 / 40%);
+  background: rgb(248 113 113 / 14%);
+}
+
+.ui-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.ui-button-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ui-button-spinner {
+  position: static;
+}
+
+.ui-spinner {
+  display: inline-block;
+  flex: none;
+  border: 2px solid rgb(255 255 255 / 18%);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+.ui-spinner-sm {
+  width: 14px;
+  height: 14px;
+}
+
+.ui-spinner-md {
+  width: 20px;
+  height: 20px;
+}
+
+.ui-spinner-lg {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+.ui-badge {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 14px;
+  color: #d4d4d8;
+  font-family: var(--font-code);
+  font-size: 11px;
+}
+
+.ui-badge i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.ui-badge i.is-pulsing {
+  animation: status-pulse 1.8s ease-in-out infinite;
+}
+
+.ui-badge-success {
+  border-color: rgb(16 185 129 / 22%);
+  background: rgb(16 185 129 / 5%);
+  color: #6ee7b7;
+}
+
+.ui-badge-success i {
+  background: var(--accent-emerald);
+}
+
+.ui-badge-info {
+  border-color: rgb(59 130 246 / 24%);
+  background: rgb(59 130 246 / 6%);
+  color: #93c5fd;
+}
+
+.ui-badge-info i {
+  background: var(--accent-blue);
+}
+
+.ui-badge-danger {
+  border-color: rgb(248 113 113 / 24%);
+  background: rgb(248 113 113 / 6%);
+  color: #fca5a5;
+}
+
+.ui-badge-danger i {
+  background: var(--danger);
+}
+
+.ui-badge-warning {
+  border-color: rgb(245 158 11 / 24%);
+  background: rgb(245 158 11 / 6%);
+  color: #fcd34d;
+}
+
+.ui-badge-warning i {
+  background: var(--accent-warning);
+}
+
+.ui-badge-neutral i {
+  background: var(--text-muted);
+}
+
+.ui-input-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ui-input-label {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ui-input {
+  height: 40px;
+  padding: 0 13px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.ui-input::placeholder {
+  color: var(--text-muted);
+}
+
+.ui-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgb(59 130 246 / 15%);
+}
+
+.ui-input-has-error {
+  border-color: rgb(248 113 113 / 45%);
+}
+
+.ui-input-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.ui-input-error {
+  color: #fca5a5;
+  font-size: 11px;
+}
+
+.ui-error-state,
+.ui-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 20px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.ui-error-state {
+  border-color: rgb(248 113 113 / 22%);
+  background: rgb(248 113 113 / 5%);
+}
+
+.ui-error-state-title,
+.ui-empty-state-title {
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.ui-error-state-description,
+.ui-empty-state-description {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.ui-empty-state {
+  align-items: center;
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.ui-empty-state-icon {
+  color: var(--text-muted);
+}
+
+/* ==========================================================================
+   Authenticated shell (sidebar layout) — Dashboard, Integrations, Admin
+   Settings all nest inside this shared shell.
+   ========================================================================== */
+
+.authenticated-shell {
+  display: flex;
+  height: 100vh;
+  background: var(--bg-app);
+}
+
+.authenticated-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  height: 100vh;
+  overflow-y: auto;
+}
+
+.authenticated-topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  flex: none;
+  min-height: 56px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgb(18 18 21 / 92%);
+}
+
+.authenticated-github-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #6ee7b7;
+  font-family: var(--font-code);
+  font-size: 9px;
+  letter-spacing: 0.03em;
+}
+
+.authenticated-github-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-emerald);
+  box-shadow: 0 0 0 4px rgb(16 185 129 / 9%);
+}
+
+.authenticated-github-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  min-height: 30px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: #d4d4d8;
+  font-size: 11px;
+}
+
+.authenticated-github-user img {
+  border-radius: 50%;
+}
+
+/* ==========================================================================
+   Admin area — a separate email/password-authenticated principal, isolated
+   from the GitHub-based authenticated shell above. See
+   graphify/server/admin_sessions.py and app/lib/admin-session-context.tsx.
+   ========================================================================== */
+
+.admin-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--bg-app);
+}
+
+.admin-topbar {
+  display: flex;
+  flex: none;
+  min-height: 56px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgb(18 18 21 / 92%);
+}
+
+.admin-topbar-brand {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.admin-topbar-account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.admin-topbar-signout {
+  padding: 6px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.admin-topbar-signout:hover {
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+}
+
+.admin-main {
+  flex: 1;
+  overflow-y: auto;
+}
+
+.admin-login-page {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-app);
+}
+
+.admin-login-panel {
+  width: 100%;
+  max-width: 360px;
+  padding: 32px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-panel);
+}
+
+.admin-login-panel h1 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.admin-login-intro {
+  margin: 0 0 24px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.admin-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.page-banner.is-error {
+  border: 1px solid rgb(239 68 68 / 25%);
+  background: rgb(239 68 68 / 8%);
+  color: #fca5a5;
+}
+
+.authenticated-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  flex: none;
+  width: 260px;
+  margin: 12px;
+  padding: 16px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: inset 0 0 20px rgb(0 0 0 / 30%);
+  transition: width 160ms ease;
+}
+
+.sidebar.is-collapsed {
+  width: 72px;
+}
+
+.sidebar-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 4px 16px;
+}
+
+.sidebar-collapse-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.sidebar-collapse-toggle:hover {
+  color: var(--text-primary);
+  background: rgb(255 255 255 / 6%);
+}
+
+.sidebar-collapse-toggle svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sidebar-nav {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 10px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.sidebar-nav-item:hover {
+  color: var(--text-primary);
+  background: rgb(255 255 255 / 4%);
+}
+
+.sidebar-nav-item.is-active {
+  color: var(--text-primary);
+  background: rgb(16 185 129 / 10%);
+}
+
+.sidebar-nav-item svg {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sidebar-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 8px 4px;
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 8px;
+}
+
+.sidebar-user-avatar {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.sidebar-user-avatar-fallback {
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+}
+
+.sidebar-user-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  flex: 1;
+}
+
+.sidebar-user-identity strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-user-identity span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-logout {
+  flex: none;
+  padding: 6px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.sidebar-logout:hover {
+  color: var(--text-primary);
+  border-color: var(--border-focus);
+}
+
+.sidebar.is-collapsed .sidebar-nav-item span,
+.sidebar.is-collapsed .sidebar-user-identity,
+.sidebar.is-collapsed .sidebar-logout {
+  display: none;
+}
+
+.sidebar-mobile-toggle {
+  display: none;
+}
+
+.sidebar-mobile-scrim {
+  display: none;
+}
+
+@media (max-width: 767px) {
+  .sidebar-mobile-toggle {
+    position: fixed;
+    top: 16px;
+    left: 16px;
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    width: 40px;
+    height: 40px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-panel);
+    cursor: pointer;
+  }
+
+  .sidebar-mobile-toggle span {
+    width: 16px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--text-primary);
+  }
+
+  .sidebar-mobile-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    display: block;
+    background: rgb(0 0 0 / 50%);
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 35;
+    width: 260px;
+    margin: 12px;
+    transform: translateX(calc(-100% - 24px));
+    transition: transform 200ms ease;
+  }
+
+  .sidebar.is-mobile-open {
+    transform: translateX(0);
+  }
+}
+
+/* ==========================================================================
+   Shared authenticated-page content wrapper (Integrations, Admin Settings)
+   ========================================================================== */
+
+.page-content {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 48px 32px;
+}
+
+.page-content-centered {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.page-header {
+  margin-bottom: 28px;
+}
+
+.page-header h1 {
+  margin: 0 0 6px;
+  color: var(--text-primary);
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.page-header p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.page-banner {
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  font-size: 13px;
+}
+
+.page-banner.is-success {
+  border: 1px solid rgb(16 185 129 / 22%);
+  background: rgb(16 185 129 / 6%);
+  color: #6ee7b7;
+}
+
+.dashboard-loading-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 60vh;
+}
+
+.repository-provider-badge {
+  padding: 2px 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-code);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+/* ==========================================================================
+   Integrations screen
+   ========================================================================== */
+
+.integrations-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.integration-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.integration-card.is-not-configured {
+  opacity: 0.6;
+}
+
+.integration-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.integration-card-header > div {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.integration-card-header strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.integration-card-login {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.integration-card-icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--bg-input);
+  border: 1px solid var(--border-subtle);
+}
+
+.integration-card-message {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.integration-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.integration-card-note {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/* ==========================================================================
+   Admin Settings screen
+   ========================================================================== */
+
+.admin-credentials-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.llm-credential-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.llm-credential-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.llm-credential-card-header strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.llm-credential-card-model {
+  margin: 0;
+  color: var(--text-muted);
+  font-family: var(--font-code);
+  font-size: 12px;
+}
+
+.llm-credential-card-verify {
+  margin: 0;
+  font-size: 12px;
+}
+
+.llm-credential-card-verify.is-ok {
+  color: #6ee7b7;
+}
+
+.llm-credential-card-verify.is-error {
+  color: #fca5a5;
+}
+
+.llm-credential-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* ==========================================================================
+   Modal (LLM credential configure)
+   ========================================================================== */
+
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 60%);
+}
+
+.modal-panel {
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 40%);
+}
+
+.modal-panel h2 {
+  margin: 0 0 16px;
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.modal-panel form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.modal-error {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 12px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}

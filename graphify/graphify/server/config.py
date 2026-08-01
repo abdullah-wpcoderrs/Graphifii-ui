@@ -37,6 +37,61 @@ class Settings(BaseSettings):
     github_private_key: str
     github_webhook_secret: str
 
+    # GitLab/GitBucket integrations and Railway sandbox provisioning are
+    # optional: the admin may not have created those OAuth apps or a Railway
+    # account yet, and the server must still boot and serve GitHub-only
+    # traffic. Routes that need one of these check for None and report
+    # "not_configured" rather than failing at startup like the required
+    # GitHub settings above.
+    gitlab_client_id: str | None = None
+    gitlab_client_secret: str | None = None
+    gitlab_webhook_secret: str | None = None
+
+    gitbucket_instance_url: str | None = None
+    gitbucket_client_id: str | None = None
+    gitbucket_client_secret: str | None = None
+    gitbucket_webhook_secret: str | None = None
+
+    railway_api_token: str | None = None
+    # Railway needs to know *which* service to deploy as a sandbox, not just
+    # the account token. All three come from the Railway dashboard URL /
+    # GraphQL API — see docs/railway-setup.md.
+    railway_project_id: str | None = None
+    railway_service_id: str | None = None
+    railway_environment_id: str | None = None
+    workspace_storage_type: str = "local"
+    # Where uploaded sandbox artifacts land when workspace_storage_type is
+    # "local". Each project gets a subdirectory holding graph.json and
+    # files.json; Project.graph_json_url points at that graph.json, and
+    # routes/projects.py reads files.json from alongside it.
+    workspace_storage_dir: str = "./workspace-storage"
+
+    # Shared secret the sandbox job presents when POSTing progress back to
+    # /api/internal/projects/{id}/status. Without it that endpoint would let
+    # anyone move any project to READY and point it at an arbitrary graph URL.
+    sandbox_callback_secret: str | None = None
+
+    # Public base URL the *sandbox container* uses to reach this backend.
+    #
+    # Deliberately separate from backend_url. In development they differ:
+    # backend_url must stay http://localhost:8000 because it also drives
+    # OAuth redirect URIs (registered with GitHub/GitLab) and the Secure
+    # cookie flag (an https:// value there stops the browser sending session
+    # cookies over plain-http localhost). Meanwhile a Railway container
+    # cannot reach localhost at all and needs a tunnel URL.
+    #
+    # In production both are the same public origin and this can be left
+    # unset — it falls back to backend_url.
+    sandbox_callback_base_url: str | None = None
+
+    # Admin area (Phase 4). Signed with its own secret, deliberately separate
+    # from session_secret so an admin cookie cannot be forged from the GitHub
+    # session key or vice versa. Optional for the same reason as the
+    # integrations above: a deployment that has not run `seed-admin` yet must
+    # still boot and serve normal traffic — the admin auth routes report
+    # not_configured instead of the app failing at startup.
+    admin_session_secret: str | None = None
+
     @field_validator(
         "database_url",
         "session_secret",
@@ -78,7 +133,44 @@ class Settings(BaseSettings):
     def _secrets_must_differ(self) -> "Settings":
         if self.session_secret == self.token_encryption_key:
             raise ValueError("SESSION_SECRET and TOKEN_ENCRYPTION_KEY must be different values")
+        # The whole point of a separate admin cookie is that compromising one
+        # signing key does not yield the other. Reusing a value here would
+        # silently collapse that isolation back into a single trust boundary.
+        if self.admin_session_secret is not None and self.admin_session_secret in (
+            self.session_secret,
+            self.token_encryption_key,
+        ):
+            raise ValueError(
+                "ADMIN_SESSION_SECRET must differ from SESSION_SECRET and TOKEN_ENCRYPTION_KEY — "
+                "reusing one defeats the admin/user session isolation"
+            )
         return self
+
+    @property
+    def gitlab_configured(self) -> bool:
+        return bool(self.gitlab_client_id and self.gitlab_client_secret)
+
+    @property
+    def admin_auth_configured(self) -> bool:
+        return bool(self.admin_session_secret)
+
+    @property
+    def callback_base_url(self) -> str:
+        """Where the sandbox should POST progress. Falls back to backend_url."""
+        return (self.sandbox_callback_base_url or self.backend_url).rstrip("/")
+
+    @property
+    def railway_configured(self) -> bool:
+        return bool(
+            self.railway_api_token
+            and self.railway_project_id
+            and self.railway_service_id
+            and self.railway_environment_id
+        )
+
+    @property
+    def gitbucket_configured(self) -> bool:
+        return bool(self.gitbucket_instance_url and self.gitbucket_client_id and self.gitbucket_client_secret)
 
 
 @lru_cache

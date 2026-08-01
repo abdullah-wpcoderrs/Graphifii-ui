@@ -3,6 +3,7 @@ export type AuthErrorCode =
   | "invalid_state"
   | "github_unavailable"
   | "callback_failed"
+  | "integration_connection_failed"
   | "unknown";
 
 export type AuthErrorContent = {
@@ -49,6 +50,15 @@ const AUTH_ERRORS: Record<AuthErrorCode, AuthErrorContent> = {
       "The authorization response reached Graphify, but the secure session could not be completed.",
     guidance:
       "Retry the connection. Share the reference below with your administrator if the problem repeats.",
+  },
+  integration_connection_failed: {
+    code: "integration_connection_failed",
+    eyebrow: "INTEGRATION CONNECTION FAILED",
+    title: "Could not connect to the integration provider.",
+    description:
+      "The authorization request may have expired, or the provider was temporarily unavailable. Your existing integrations and repository access are unchanged.",
+    guidance:
+      "Return to Integrations and try connecting again. Share the reference below with your administrator if the problem repeats.",
   },
   unknown: {
     code: "unknown",

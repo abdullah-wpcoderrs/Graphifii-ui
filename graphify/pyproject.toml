@@ -81,6 +81,15 @@ server = [
     "itsdangerous>=2.2",
     "PyJWT[crypto]>=2.9",
     "httpx>=0.27",
+    # Admin password hashing (Phase 4). argon2-cffi directly rather than
+    # passlib: one algorithm, actively maintained, no legacy backend layer.
+    "argon2-cffi>=23.1",
+    # EmailStr validation on the admin login payload.
+    "email-validator>=2.2",
+    # Multipart parsing for the sandbox artifact upload endpoint. FastAPI
+    # raises at import time (not request time) if a route declares UploadFile
+    # without it, so this is required for the app to start at all.
+    "python-multipart>=0.0.9",
 ]
 video = ["faster-whisper; python_version >= '3.11'", "yt-dlp>=2026.6.9"]
 kimi = ["openai", "tiktoken"]
@@ -106,6 +115,7 @@ all = ["mcp>=1,<3", "starlette>=1.3.1,<2", "neo4j", "falkordb", "pypdf>=6.12.0",
 [project.scripts]
 graphify = "graphify.__main__:main"
 graphify-mcp = "graphify.serve:_main"
+graphify-server = "graphify.server.app:run"
 
 [dependency-groups]
 dev = [
@@ -118,6 +128,7 @@ dev = [
     "pre-commit>=4.6.0",
     "pyright>=1.1.409",
     "pytest>=9.0.3",
+    "pytest-asyncio>=1.0.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.15.13",
     "setuptools>=82.0.1",
@@ -145,6 +156,7 @@ graphify = ["skill.md", "skill-codex.md", "skill-opencode.md", "skill-kilo.md", 
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "auto"
 norecursedirs = [
     "graphify-benchmark", "graphify_eval", "graphify_test",
     "worked", "llm-stack-corpus", "llm-stack-demo", "product-site",

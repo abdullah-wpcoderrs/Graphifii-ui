@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from graphify.server.config import get_settings
 from graphify.server.crypto import encrypt
 from graphify.server.db import get_db
-from graphify.server.github_client import (
+from graphify.server.git_clients import (
     GitHubAuthError,
     GitHubUnavailableError,
     exchange_code_for_token,

@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import Image from "next/image";
+import { useRouter } from "next/navigation";
 import { BrandLockup } from "./brand-lockup";
+import { fetchSession } from "../lib/session";
 
-type AuthState = "ready" | "redirecting" | "error";
+type AuthState = "checking-session" | "ready" | "redirecting" | "error";
 
 type AuthScreenProps = {
   apiUrl: string | null;
@@ -13,13 +15,45 @@ type AuthScreenProps = {
 const REDIRECT_DELAY_MS = 650;
 
 export function AuthScreen({ apiUrl }: AuthScreenProps) {
-  const [authState, setAuthState] = useState<AuthState>("ready");
+  const router = useRouter();
+  const [authState, setAuthState] = useState<AuthState>(
+    apiUrl ? "checking-session" : "ready",
+  );
 
   useEffect(() => {
     return () => {
       document.documentElement.classList.remove("auth-is-redirecting");
     };
   }, []);
+
+  useEffect(() => {
+    if (!apiUrl) {
+      return;
+    }
+
+    let cancelled = false;
+
+    fetchSession()
+      .then((session) => {
+        if (cancelled) return;
+        if (session) {
+          router.replace("/dashboard");
+          return;
+        }
+        setAuthState("ready");
+      })
+      .catch(() => {
+        // A failed session check (network/config issue) should not block
+        // sign-in — fall back to showing the normal auth form.
+        if (!cancelled) {
+          setAuthState("ready");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [apiUrl, router]);
 
   function continueWithGitHub() {
     if (authState === "redirecting") {
@@ -126,16 +160,18 @@ export function AuthScreen({ apiUrl }: AuthScreenProps) {
               className="github-button"
               type="button"
               onClick={continueWithGitHub}
-              disabled={authState === "redirecting"}
+              disabled={authState === "redirecting" || authState === "checking-session"}
               aria-describedby="github-permission-note"
             >
               <Image src="/github-mark.svg" alt="" width={20} height={20} />
               <span>
                 {authState === "redirecting"
                   ? "Connecting to GitHub…"
-                  : "Continue with GitHub"}
+                  : authState === "checking-session"
+                    ? "Checking your session…"
+                    : "Continue with GitHub"}
               </span>
-              {authState === "redirecting" && (
+              {(authState === "redirecting" || authState === "checking-session") && (
                 <span className="button-spinner" aria-hidden="true" />
               )}
             </button>

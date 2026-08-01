@@ -75,4 +75,10 @@ async def get_current_user(
     if user is None:
         raise HTTPException(status_code=401, detail="user not found")
 
+    # Checked on every request so an admin suspending an account revokes the
+    # already-issued session cookie immediately, rather than leaving it valid
+    # until its 30-day expiry.
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="account is suspended")
+
     return user

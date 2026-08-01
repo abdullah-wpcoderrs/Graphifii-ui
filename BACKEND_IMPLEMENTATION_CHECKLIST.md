@@ -1,6 +1,6 @@
 # Graphify Cloud IDE - Backend Implementation Checklist
 
-**Status:** Phase 0/1 complete; Phase 2 code complete, pending live E2E verification
+**Status:** Phase 0/1/2 complete and live-verified; Phase 3 backend code complete
 **Database:** Neon (PostgreSQL)
 **Backend:** Python 3.12 / FastAPI, hosted on Railway (single service — not a separate Node.js orchestrator)
 **Frontend:** Next.js 16 (Vercel)
@@ -168,6 +168,79 @@ pooled connection endpoint.
   ask. Do this next with both servers running locally.
 
 **Phase 2: code complete, needs a live end-to-end browser pass.**
+
+---
+
+## Phase 3 — Real data, integrations, admin LLM credentials
+
+Scope per `frontend/docs/IMPLEMENTATION_PLAN.md` and `TASK_CHECKLIST.md`.
+Backend portion complete this session; frontend portion (sidebar, screens,
+service adapters) not started.
+
+- [x] **3.1** `graphify/server/models.py` — added `SystemCredential`
+  (provider, key_ciphertext, key_iv, key_salt, model, unique index on
+  provider) and `gitlab_*`/`gitbucket_*` token fields on `User`, mirroring
+  the GitHub token pattern.
+- [x] **3.2** Alembic migration `9bb30a4ebf51_add_system_credentials_and_integration_.py`
+  generated, reviewed (correct nullable columns, unique index, clean
+  downgrade), and applied to Neon — confirmed via direct query that
+  `system_credentials` and the new `users` columns exist.
+- [x] **3.3** `graphify/server/github_client.py` renamed to `git_clients.py`
+  (import updated in `routes/auth.py`); added `GitLabOAuthClient` (gitlab.com
+  OAuth2 + `/api/v4/user`) and `GitBucketOAuthClient` (parameterized
+  `instance_url`, GitHub-compatible OAuth shape), each with their own
+  `*AuthError`/`*UnavailableError` pair.
+- [x] **3.4** `config.py` — added optional (default `None`)
+  `gitlab_client_id/secret/webhook_secret`, `gitbucket_instance_url` +
+  `client_id/secret/webhook_secret`, `railway_api_token`, and
+  `workspace_storage_type` (default `"local"`); `gitlab_configured` /
+  `gitbucket_configured` properties gate the integration routes. Kept
+  optional deliberately — GitLab/GitBucket OAuth apps and a Railway token
+  are not yet provided by the user (see Open questions).
+- [x] **3.5** `graphify/server/routes/projects.py` (new) —
+  `GET /api/projects`, `/api/projects/:id`, `/api/projects/:id/graph`,
+  `/api/projects/:id/files`. Graph/file-tree artifacts are fetched from
+  either an http(s) URL or a local filesystem path stored on
+  `Project.graph_json_url` (files.json expected alongside it) — local
+  storage only for now, S3/R2 still an open question.
+- [x] **3.6** `graphify/server/routes/github.py` (new) — `GET /api/repositories`,
+  decrypts the user's GitHub token and calls `GET /user/repos`; expired
+  token returns a plain 401 (refresh rotation is Phase 5).
+- [x] **3.7** `graphify/server/routes/integrations.py` (new) —
+  `GET /api/integrations` (status per provider: connected/not_connected/
+  not_configured), `/:provider/login`, `/:provider/callback`,
+  `POST /:provider/disconnect`, `GET /:provider/repos` for `gitlab` and
+  `gitbucket`. Same double-submit-cookie OAuth state pattern as Phase 2's
+  GitHub flow, cookie name parameterized per provider so simultaneous
+  flows don't collide.
+- [x] **3.8** `graphify/server/routes/admin.py` (new) — admin-only
+  (`current_user.role == ADMIN`, else 403) CRUD for `SystemCredential`
+  (`GET/POST/PUT/DELETE /api/admin/credentials[/:provider]`) plus
+  `POST /api/admin/credentials/verify`, which decrypts the stored key and
+  makes one lightweight test call to the provider's API (OpenAI/Gemini via
+  an OpenAI-compatible chat-completions call, Anthropic via
+  `/v1/messages`) rather than pulling in the optional SDK extras.
+- [x] **3.9** `graphify/server/sandbox.py` (new) —
+  `launch_project_on_railway()` calling Railway's GraphQL API
+  (`backboard.railway.app/graphql/v2`) to trigger an ephemeral job.
+  Deliberately not wired into any route yet: the actual "Launch Workspace"
+  trigger + WebSocket progress streaming is Phase 4, and
+  `RAILWAY_API_TOKEN` isn't set yet — raises `RailwayNotConfiguredError`
+  until it is.
+- [x] **3.10** Wired `projects_router`, `github_router`,
+  `integrations_router`, `admin_router` into `app.py` alongside the
+  existing `auth_router`.
+- [x] **3.11** Verified: `ruff check graphify/server/` and
+  `pyright graphify/server/` both clean. 17-check ad hoc `TestClient` pass
+  (dependency-overridden `get_current_user`/`get_db`, no real GitHub/GitLab/
+  GitBucket calls) covering empty-list/404/401/403 paths, provider
+  validation, and the not-yet-configured GitLab/GitBucket states. Booted
+  the real server against the live Neon DB — `/health` returns 200 and all
+  16 new + existing routes appear in `/openapi.json`.
+
+**Phase 3 backend: code complete and verified (TestClient + live boot).
+Frontend (sidebar, dashboard/repositories/integrations/admin screens,
+service adapters, client-side encryption) not started.**
 
 ---
 

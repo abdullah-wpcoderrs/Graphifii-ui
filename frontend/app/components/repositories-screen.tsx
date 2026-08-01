@@ -1,30 +1,38 @@
-import Image from "next/image";
-import Link from "next/link";
-import type {
-  DashboardFilters,
-  DashboardView,
-  Repository,
-  RepositoryProjectState,
-} from "../lib/dashboard";
-import { BrandLockup } from "./brand-lockup";
+"use client";
 
-type DashboardScreenProps = {
-  filters: DashboardFilters;
-  repositories: Repository[];
-  totalRepositoryCount: number;
-  totalWorkspaceCount: number;
-  view: DashboardView;
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import type {
+  RepositoryFilters,
+  RepositoryListView,
+  Repository,
+} from "../lib/repositories";
+import { filterRepositories, mapRepository } from "../lib/repositories";
+import {
+  fetchGitHubRepos,
+  fetchIntegrationRepos,
+  fetchIntegrations,
+  fetchProjects,
+  launchProject,
+  Project,
+} from "../lib/api";
+import { ApiError } from "../lib/api-errors";
+import { Spinner } from "./ui";
+
+type RepositoriesScreenProps = {
+  filters: RepositoryFilters;
 };
 
-const STATE_LABELS: Record<RepositoryProjectState, string> = {
+const STATE_LABELS: Record<Repository["projectState"], string> = {
   available: "Available",
   provisioning: "Provisioning",
   ready: "Ready",
   failed: "Failed",
 };
 
-const DASHBOARD_STATE_CONTENT: Record<
-  Exclude<DashboardView, "list" | "syncing">,
+const REPOSITORIES_STATE_CONTENT: Record<
+  "no-repositories" | "error" | "unauthorized",
   {
     eyebrow: string;
     title: string;
@@ -33,37 +41,29 @@ const DASHBOARD_STATE_CONTENT: Record<
     actionHref: string;
   }
 > = {
-  "no-installation": {
-    eyebrow: "GitHub connection required",
-    title: "Install the GitHub App to discover repositories.",
-    description:
-      "Graphify only lists repositories you explicitly select during installation. Existing project data is not affected.",
-    actionLabel: "Connect GitHub",
-    actionHref: "/onboarding/github",
-  },
   "no-repositories": {
-    eyebrow: "No repository access",
-    title: "Choose the repositories you want to use with Graphify.",
+    eyebrow: "No repositories yet",
+    title: "Connect a provider to see your repositories here.",
     description:
-      "The GitHub App is installed, but no repositories are selected. Update the installation to continue.",
-    actionLabel: "Configure repository access",
-    actionHref: "/onboarding/github?state=no-repositories",
+      "Visit Integrations to connect GitHub, GitLab, or GitBucket and grant Graphify access to the repositories you want to use.",
+    actionLabel: "Go to Integrations",
+    actionHref: "/integrations",
   },
   error: {
     eyebrow: "Repository sync unavailable",
     title: "Graphify could not load your repositories.",
     description:
-      "The connection may be temporarily unavailable. Retry the request; your GitHub access and existing workspaces are unchanged.",
+      "The connection may be temporarily unavailable. Retry the request; your access and existing workspaces are unchanged.",
     actionLabel: "Retry",
-    actionHref: "/dashboard",
+    actionHref: "/repositories",
   },
-  "rate-limited": {
-    eyebrow: "GitHub limit reached",
-    title: "Repository sync is paused for a little while.",
+  unauthorized: {
+    eyebrow: "Connection expired",
+    title: "Your GitHub connection needs to be reconnected.",
     description:
-      "GitHub asked Graphify to slow down. Your existing workspaces remain available, and repository sync can resume after the limit resets.",
-    actionLabel: "View existing repositories",
-    actionHref: "/dashboard",
+      "Graphify could not use your stored GitHub access token. Reconnect from Integrations to keep browsing repositories.",
+    actionLabel: "Go to Integrations",
+    actionHref: "/integrations",
   },
 };
 
@@ -76,21 +76,19 @@ function SearchIcon() {
   );
 }
 
-function SyncIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 20 20">
-      <path d="M16 6.5A7 7 0 0 0 4.1 4.8L2.5 6.5M4 13.5a7 7 0 0 0 11.9 1.7l1.6-1.7" />
-      <path d="M2.5 2.5v4h4M17.5 17.5v-4h-4" />
-    </svg>
-  );
-}
-
 function RepositoryAction({ repository }: { repository: Repository }) {
+  const router = useRouter();
+  const [launching, setLaunching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
   if (repository.projectState === "provisioning") {
     return (
-      <span className="repository-action is-disabled" aria-disabled="true">
+      <Link
+        className="repository-action"
+        href={`/projects/${repository.workspaceId}/launch`}
+      >
         Provisioning
-      </span>
+      </Link>
     );
   }
 
@@ -106,15 +104,36 @@ function RepositoryAction({ repository }: { repository: Repository }) {
   }
 
   const isRetry = repository.projectState === "failed";
-  const projectId = repository.workspaceId ?? repository.id;
+
+  async function handleLaunch() {
+    setError(null);
+    setLaunching(true);
+    try {
+      const result = await launchProject({
+        repoFullName: `${repository.owner}/${repository.name}`,
+        repoUrl: repository.htmlUrl,
+        provider: repository.provider,
+        defaultBranch: repository.defaultBranch,
+      });
+      router.push(`/projects/${result.project_id}/launch`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not start extraction");
+      setLaunching(false);
+    }
+  }
 
   return (
-    <Link
-      className={`repository-action ${isRetry ? "is-retry" : "is-primary"}`}
-      href={`/projects/${projectId}/launch`}
-    >
-      {isRetry ? "Retry" : "Launch Workspace"}
-    </Link>
+    <span className="repository-action-group">
+      <button
+        className={`repository-action ${isRetry ? "is-retry" : "is-primary"}`}
+        type="button"
+        disabled={launching}
+        onClick={handleLaunch}
+      >
+        {launching ? "Starting…" : isRetry ? "Retry" : "Launch Workspace"}
+      </button>
+      {error && <span className="repository-action-error">{error}</span>}
+    </span>
   );
 }
 
@@ -135,6 +154,7 @@ function RepositoryRow({ repository }: { repository: Repository }) {
           <div className="repository-tags">
             <span>{repository.visibility}</span>
             <span>{repository.defaultBranch}</span>
+            <span className="repository-provider-badge">{repository.provider}</span>
             <span className="repository-language">
               <i className={`is-${repository.languageTone}`} />
               {repository.language}
@@ -167,13 +187,11 @@ function RepositoryRow({ repository }: { repository: Repository }) {
   );
 }
 
-function DashboardEmptyState({
-  view,
+function RepositoriesEmptyState({
+  content,
 }: {
-  view: Exclude<DashboardView, "list" | "syncing">;
+  content: (typeof REPOSITORIES_STATE_CONTENT)[keyof typeof REPOSITORIES_STATE_CONTENT];
 }) {
-  const content = DASHBOARD_STATE_CONTENT[view];
-
   return (
     <section className="dashboard-empty-state" aria-labelledby="empty-title">
       <div className="dashboard-empty-graphic" aria-hidden="true">
@@ -192,35 +210,93 @@ function DashboardEmptyState({
   );
 }
 
-export function DashboardScreen({
-  filters,
-  repositories,
-  totalRepositoryCount,
-  totalWorkspaceCount,
-  view,
-}: DashboardScreenProps) {
-  if (view !== "list" && view !== "syncing") {
+async function loadRepositories(): Promise<Repository[]> {
+  const [projects, integrations] = await Promise.all([
+    fetchProjects().catch(() => [] as Project[]),
+    fetchIntegrations().catch(() => []),
+  ]);
+
+  const projectsByRepoName = new Map(projects.map((p) => [p.repo_name, p]));
+
+  const providerFetches: Promise<Repository[]>[] = [
+    fetchGitHubRepos().then((repos) =>
+      repos.map((r) => mapRepository(r, "github", projectsByRepoName)),
+    ),
+  ];
+
+  for (const integration of integrations) {
+    if (integration.status === "connected" && integration.id !== "github") {
+      const provider = integration.id as "gitlab" | "gitbucket";
+      providerFetches.push(
+        fetchIntegrationRepos(provider)
+          .then((repos) => repos.map((r) => mapRepository(r, provider, projectsByRepoName)))
+          .catch(() => []),
+      );
+    }
+  }
+
+  const results = await Promise.all(providerFetches);
+  return results.flat();
+}
+
+export function RepositoriesScreen({ filters }: RepositoriesScreenProps) {
+  const [repositories, setRepositories] = useState<Repository[] | null>(null);
+  const [view, setView] = useState<RepositoryListView | "unauthorized">("list");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadRepositories()
+      .then((repos) => {
+        if (cancelled) return;
+        setRepositories(repos);
+        setView(repos.length === 0 ? "no-repositories" : "list");
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setRepositories([]);
+        setView(error instanceof ApiError && error.isUnauthorized ? "unauthorized" : "error");
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const filtered = useMemo(
+    () => filterRepositories(repositories ?? [], filters),
+    [repositories, filters],
+  );
+
+  const hasFilters =
+    filters.query !== "" || filters.ownership !== "all" || filters.state !== "all";
+
+  if (repositories === null) {
     return (
       <main className="dashboard-page">
-        <DashboardHeader isSyncing={false} />
-        <DashboardEmptyState view={view} />
+        <div className="dashboard-loading-shell">
+          <Spinner size="lg" label="Loading repositories" />
+        </div>
       </main>
     );
   }
 
-  const hasFilters =
-    filters.query !== "" ||
-    filters.ownership !== "all" ||
-    filters.state !== "all";
+  if (view === "no-repositories" || view === "error" || view === "unauthorized") {
+    return (
+      <main className="dashboard-page">
+        <RepositoriesEmptyState content={REPOSITORIES_STATE_CONTENT[view]} />
+      </main>
+    );
+  }
+
+  const totalWorkspaceCount = repositories.filter((r) => r.workspaceId).length;
 
   return (
     <main className="dashboard-page">
-      <DashboardHeader isSyncing={view === "syncing"} />
-
       <div className="dashboard-shell">
         <section className="dashboard-heading" aria-labelledby="dashboard-title">
           <div>
-            <p className="dashboard-eyebrow">Repository dashboard</p>
+            <p className="dashboard-eyebrow">Repositories</p>
             <h1 id="dashboard-title">Choose where to work.</h1>
             <p>
               Launch a new Graphify workspace or return to a repository you
@@ -230,7 +306,7 @@ export function DashboardScreen({
           <dl className="dashboard-summary">
             <div>
               <dt>Repositories</dt>
-              <dd>{totalRepositoryCount.toString().padStart(2, "0")}</dd>
+              <dd>{repositories.length.toString().padStart(2, "0")}</dd>
             </div>
             <div>
               <dt>Workspaces</dt>
@@ -239,19 +315,7 @@ export function DashboardScreen({
           </dl>
         </section>
 
-        {view === "syncing" && (
-          <div className="dashboard-sync-notice" role="status">
-            <SyncIcon />
-            <div>
-              <strong>Syncing repositories from GitHub</strong>
-              <span>
-                The list stays available while Graphify checks for changes.
-              </span>
-            </div>
-          </div>
-        )}
-
-        <form className="dashboard-filters" action="/dashboard">
+        <form className="dashboard-filters" action="/repositories">
           <label className="dashboard-search">
             <span className="sr-only">Search repositories</span>
             <SearchIcon />
@@ -285,7 +349,7 @@ export function DashboardScreen({
 
           <button type="submit">Apply filters</button>
           {hasFilters && (
-            <Link className="dashboard-clear-filters" href="/dashboard">
+            <Link className="dashboard-clear-filters" href="/repositories">
               Clear
             </Link>
           )}
@@ -298,8 +362,8 @@ export function DashboardScreen({
             <span>Graphify state</span>
           </header>
 
-          {repositories.length > 0 ? (
-            repositories.map((repository) => (
+          {filtered.length > 0 ? (
+            filtered.map((repository) => (
               <RepositoryRow key={repository.id} repository={repository} />
             ))
           ) : (
@@ -310,7 +374,7 @@ export function DashboardScreen({
                 Try a different repository name, ownership group, or workspace
                 state.
               </p>
-              <Link className="action-secondary" href="/dashboard">
+              <Link className="action-secondary" href="/repositories">
                 Clear filters
               </Link>
             </div>
@@ -319,39 +383,11 @@ export function DashboardScreen({
 
         <footer className="dashboard-footer">
           <span>
-            Showing {repositories.length} of {totalRepositoryCount} repositories
+            Showing {filtered.length} of {repositories.length} repositories
           </span>
-          <Link href="/onboarding/github?state=connected">
-            Manage GitHub access
-          </Link>
+          <Link href="/integrations">Manage connections</Link>
         </footer>
       </div>
     </main>
-  );
-}
-
-function DashboardHeader({ isSyncing }: { isSyncing: boolean }) {
-  return (
-    <header className="dashboard-header">
-      <BrandLockup priority />
-      <nav aria-label="Dashboard navigation">
-        <span className={`dashboard-sync-status ${isSyncing ? "is-syncing" : ""}`}>
-          <i aria-hidden="true" />
-          {isSyncing ? "Syncing GitHub" : "GitHub synced"}
-        </span>
-        <Link href="/admin/credentials">Admin</Link>
-        <details className="dashboard-user-menu">
-          <summary aria-label="Open user menu">
-            <Image src="/github-mark.svg" alt="" width={16} height={16} />
-            <span>maya-chen</span>
-          </summary>
-          <div>
-            <strong>Maya Chen</strong>
-            <span>maya@graphify.dev</span>
-            <Link href="/">Sign out</Link>
-          </div>
-        </details>
-      </nav>
-    </header>
   );
 }
