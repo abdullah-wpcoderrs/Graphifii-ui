@@ -21,7 +21,7 @@ Run with no arguments; all configuration is environment variables:
     REPO_URL                  repository to clone            (required)
     PROJECT_ID                for the callback URL           (required)
     GRAPHIFY_CALLBACK_URL     where to POST progress         (required)
-    GRAPHIFY_CALLBACK_SECRET  shared secret                  (required)
+    GRAPHIFY_CALLBACK_SECRET  per-run callback secret        (required)
     REPO_TOKEN                git token for private repos    (optional)
     REPO_BRANCH               branch to check out            (optional)
     OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY      (optional)
@@ -34,9 +34,11 @@ import os
 import re
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
 WORKSPACE = Path("/workspace")
@@ -44,8 +46,19 @@ OUT_DIR = WORKSPACE / "graphify-out"
 
 # Files that bloat the tree without telling a reader anything about the code.
 SKIP_DIRS = {
-    ".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build",
-    ".next", ".turbo", "target", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    ".turbo",
+    "target",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
     "graphify-out",
 }
 MAX_TREE_ENTRIES = 20000
@@ -57,8 +70,9 @@ def log(message: str) -> None:
     print(f"[sandbox] {message}", flush=True)
 
 
-def report(status: str, percent: int | None = None, message: str | None = None,
-           error: str | None = None) -> None:
+def report(
+    status: str, percent: int | None = None, message: str | None = None, error: str | None = None
+) -> None:
     """POST progress to the backend. Never raises — losing a progress ping
     must not kill an otherwise healthy extraction."""
     url = os.environ.get("GRAPHIFY_CALLBACK_URL")
@@ -75,17 +89,27 @@ def report(status: str, percent: int | None = None, message: str | None = None,
     if error is not None:
         payload["error"] = error
 
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "X-Sandbox-Secret": secret},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            response.read()
-    except Exception as exc:  # noqa: BLE001 - reporting is best-effort
-        log(f"progress report failed ({status}): {exc}")
+    event_id = str(uuid.uuid4())
+    for attempt in range(3):
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Sandbox-Secret": secret,
+                "X-Sandbox-Event-Id": event_id,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                response.read()
+            return
+        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
+            if attempt == 2:
+                log(f"progress report failed ({status}): {exc}")
+            else:
+                time.sleep(attempt + 1)
 
 
 def run(command: list[str], phase: str) -> None:
@@ -193,17 +217,27 @@ def report_usage(backend: str, prompt_tokens: int, completion_tokens: int) -> No
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
     }
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json", "X-Sandbox-Secret": secret},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=15) as response:
-            response.read()
-    except Exception as exc:  # noqa: BLE001 - reporting is best-effort
-        log(f"usage report failed: {exc}")
+    event_id = str(uuid.uuid4())
+    for attempt in range(3):
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Sandbox-Secret": secret,
+                "X-Sandbox-Event-Id": event_id,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                response.read()
+            return
+        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
+            if attempt == 2:
+                log(f"usage report failed: {exc}")
+            else:
+                time.sleep(attempt + 1)
 
 
 def build_files_json() -> dict:
@@ -259,6 +293,7 @@ def upload(graph_path: Path, files_path: Path) -> None:
         headers={
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "X-Sandbox-Secret": secret,
+            "X-Sandbox-Event-Id": str(uuid.uuid4()),
         },
         method="POST",
     )
@@ -267,10 +302,15 @@ def upload(graph_path: Path, files_path: Path) -> None:
 
 
 def main() -> int:
-    for required in ("REPO_URL", "PROJECT_ID"):
+    for required in ("REPO_URL", "PROJECT_ID", "RUN_ID"):
         if not os.environ.get(required):
             log(f"FATAL: {required} is not set")
             return 2
+    if bool(os.environ.get("GRAPHIFY_CALLBACK_URL")) != bool(
+        os.environ.get("GRAPHIFY_CALLBACK_SECRET")
+    ):
+        log("FATAL: GRAPHIFY_CALLBACK_URL and GRAPHIFY_CALLBACK_SECRET must be set together")
+        return 2
 
     try:
         report("CLONING", 5, "Cloning repository")
@@ -284,8 +324,14 @@ def main() -> int:
             report("INDEXING", 70, "Naming communities")
             try:
                 run(
-                    [sys.executable, "-m", "graphify", "label", str(WORKSPACE),
-                     f"--backend={backend}"],
+                    [
+                        sys.executable,
+                        "-m",
+                        "graphify",
+                        "label",
+                        str(WORKSPACE),
+                        f"--backend={backend}",
+                    ],
                     "community labeling",
                 )
             except RuntimeError as exc:

@@ -92,3 +92,11 @@ export function apiPut<T = unknown>(
 export function apiDelete<T = unknown>(endpoint: string, options?: RequestOptions) {
   return apiFetch<T>(endpoint, { ...options, method: "DELETE" });
 }
+
+export function apiPatch<T = unknown>(
+  endpoint: string,
+  body?: unknown,
+  options?: RequestOptions,
+) {
+  return apiFetch<T>(endpoint, { ...options, method: "PATCH", body });
+}

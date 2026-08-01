@@ -26,13 +26,21 @@ from __future__ import annotations
 
 import logging
 
+from decimal import Decimal
+
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from graphify.server.admin_sessions import get_current_admin
+from graphify.server.budget import (
+    DEFAULT_AGENT_DAILY_BUDGET,
+    UNLIMITED,
+    get_daily_budget,
+    set_daily_budget,
+)
 from graphify.server.crypto import decrypt, encrypt
 from graphify.server.db import get_db
 from graphify.server.models import Admin, SystemCredential
@@ -163,6 +171,38 @@ async def delete_credential(
         await db.delete(existing)
         await db.commit()
     return {"ok": True}
+
+
+class BudgetRequest(BaseModel):
+    # USD per user per day. -1 disables the cap entirely; 0 blocks agent use.
+    daily_budget_usd: Decimal = Field(ge=Decimal("-1"))
+
+
+@router.get("/settings/agent-budget")
+async def get_agent_budget(
+    admin: Admin = Depends(get_current_admin), db: AsyncSession = Depends(get_db)
+) -> dict:
+    limit = await get_daily_budget(db)
+    return {
+        "daily_budget_usd": str(limit),
+        "unlimited": limit == UNLIMITED,
+        "default": str(DEFAULT_AGENT_DAILY_BUDGET),
+    }
+
+
+@router.put("/settings/agent-budget")
+async def update_agent_budget(
+    payload: BudgetRequest,
+    admin: Admin = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Set the per-user daily cap on agent spend.
+
+    Enforced in budget.py against the same usage_events rows the spend
+    dashboard reports, so the cap and the dashboard can never disagree.
+    """
+    await set_daily_budget(db, payload.daily_budget_usd)
+    return {"ok": True, "daily_budget_usd": str(payload.daily_budget_usd)}
 
 
 @router.post("/credentials/verify")

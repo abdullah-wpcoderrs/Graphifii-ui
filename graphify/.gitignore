@@ -4,7 +4,12 @@ env/
 .env
 .env.*
 !.env.example
+env.backup-*
 *.pem
+*.key
+*.p12
+*.pfx
+*credentials*.json
 secrets/
 __pycache__/
 *.pyc

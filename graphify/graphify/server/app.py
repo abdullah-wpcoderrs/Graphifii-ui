@@ -12,10 +12,15 @@ Phase 3; isolated admin email/password auth from Phase 4).
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from graphify.server.config import get_settings
+from graphify.server.routes.agent import router as agent_router
 from graphify.server.routes.admin import router as admin_router
 from graphify.server.routes.admin_auth import router as admin_auth_router
 from graphify.server.routes.admin_data import router as admin_data_router
@@ -27,8 +32,44 @@ from graphify.server.routes.projects import router as projects_router
 from graphify.server.routes.usage import router as usage_router
 
 settings = get_settings()
+logger = logging.getLogger("graphify.server.app")
 
-app = FastAPI(title="Graphify Cloud IDE API")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from graphify.server.redis_queue import build_redis_run_queue
+
+    run_queue = build_redis_run_queue(settings)
+    if run_queue is not None:
+        try:
+            await run_queue.start()
+        except Exception:  # noqa: BLE001 - PostgreSQL polling is the fallback
+            logger.exception("Redis run queue unavailable; using PostgreSQL polling fallback")
+            await run_queue.close()
+            run_queue = None
+    app.state.run_queue = run_queue
+
+    worker_task = None
+    if settings.run_worker_enabled:
+        from graphify.server.run_worker import run_queue_worker
+
+        worker_task = asyncio.create_task(
+            run_queue_worker(run_queue), name="extraction-run-worker"
+        )
+    try:
+        yield
+    finally:
+        if worker_task is not None:
+            worker_task.cancel()
+            try:
+                await worker_task
+            except asyncio.CancelledError:
+                pass
+        if run_queue is not None:
+            await run_queue.close()
+
+
+app = FastAPI(title="Graphify Cloud IDE API", lifespan=lifespan)
 
 # Credentialed CORS requires an explicit origin — never "*" — per
 # docs/github-app-setup.md and frontend/docs/local-development.md.
@@ -43,6 +84,7 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(projects_router)
 app.include_router(launch_router)
+app.include_router(agent_router)
 app.include_router(usage_router)
 app.include_router(github_router)
 app.include_router(integrations_router)

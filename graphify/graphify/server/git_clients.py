@@ -70,6 +70,45 @@ async def exchange_code_for_token(code: str, redirect_uri: str) -> GitHubTokenRe
     )
 
 
+async def refresh_github_token(refresh_token: str) -> GitHubTokenResponse:
+    """Exchange a still-valid refresh token for a new access token.
+
+    Only meaningful for a GitHub App with "expire user tokens" enabled —
+    that's what makes GitHub issue a refresh_token in the first place (see
+    exchange_code_for_token above). Same endpoint as the initial exchange,
+    just a different grant_type.
+    """
+    settings = get_settings()
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        try:
+            response = await client.post(
+                GITHUB_TOKEN_URL,
+                data={
+                    "client_id": settings.github_client_id,
+                    "client_secret": settings.github_client_secret,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                headers={"Accept": "application/json"},
+            )
+        except httpx.HTTPError as exc:
+            raise GitHubUnavailableError(f"token refresh request failed: {exc}") from exc
+
+    if response.status_code >= 500:
+        raise GitHubUnavailableError(f"GitHub returned {response.status_code} during token refresh")
+
+    data = response.json()
+    if "access_token" not in data:
+        raise GitHubAuthError(data.get("error_description") or data.get("error") or "token refresh failed")
+
+    return GitHubTokenResponse(
+        access_token=data["access_token"],
+        refresh_token=data.get("refresh_token"),
+        expires_in=data.get("expires_in"),
+        refresh_token_expires_in=data.get("refresh_token_expires_in"),
+    )
+
+
 async def fetch_github_user(access_token: str) -> dict:
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
@@ -148,6 +187,41 @@ class GitLabOAuthClient:
             expires_in=data.get("expires_in"),
         )
 
+    async def refresh_access_token(self, refresh_token: str) -> GitLabTokenResponse:
+        """Exchange a still-valid refresh token for a new access token.
+
+        gitlab.com access tokens issued via Doorkeeper expire in ~2 hours;
+        the refresh token itself does not carry its own expiry, so this is
+        callable as long as the user is still connected at all.
+        """
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            try:
+                response = await client.post(
+                    GITLAB_TOKEN_URL,
+                    data={
+                        "client_id": self._client_id,
+                        "client_secret": self._client_secret,
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                    },
+                    headers={"Accept": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise GitLabUnavailableError(f"token refresh request failed: {exc}") from exc
+
+        if response.status_code >= 500:
+            raise GitLabUnavailableError(f"GitLab returned {response.status_code} during token refresh")
+
+        data = response.json()
+        if "access_token" not in data:
+            raise GitLabAuthError(data.get("error_description") or data.get("error") or "token refresh failed")
+
+        return GitLabTokenResponse(
+            access_token=data["access_token"],
+            refresh_token=data.get("refresh_token"),
+            expires_in=data.get("expires_in"),
+        )
+
     async def fetch_gitlab_user(self, access_token: str) -> dict:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             try:
@@ -190,6 +264,13 @@ class GitBucketOAuthClient:
     designed as a GitHub-compatible self-hosted server), so this mirrors
     exchange_code_for_token/fetch_github_user above but against a
     configurable instance_url rather than a hardcoded github.com host.
+
+    No refresh_token support: GitBucket's OAuth app model predates GitHub's
+    refresh-token grant and its token endpoint never returns one (confirmed
+    against GitBucketTokenResponse below, which has no refresh_token field).
+    Its access tokens also don't expire, so Phase 5's refresh rotation is a
+    structural no-op for this provider rather than a missing feature — see
+    token_refresh.py.
     """
 
     def __init__(self, instance_url: str, client_id: str, client_secret: str) -> None:

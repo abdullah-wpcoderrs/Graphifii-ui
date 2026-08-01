@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPost, apiPut } from "./api-client";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from "./api-client";
 
 export type ProjectStatus = "CLONING" | "INDEXING" | "READY" | "FAILED";
 
@@ -6,6 +6,8 @@ export type Project = {
   id: string;
   repo_name: string;
   repo_url: string;
+  provider: IntegrationProvider;
+  default_branch: string;
   status: ProjectStatus;
   graph_json_url: string | null;
   graph_html_url: string | null;
@@ -77,6 +79,19 @@ export function fetchProjectGraph(id: string) {
 
 export function fetchProjectFiles(id: string) {
   return apiGet<unknown>(`/api/projects/${id}/files`);
+}
+
+export type ProjectFileContent = {
+  path: string;
+  content: string;
+  sha: string | null;
+  size: number;
+};
+
+export function fetchProjectFileContent(id: string, path: string) {
+  return apiGet<ProjectFileContent>(
+    `/api/projects/${id}/files/${path.split("/").map(encodeURIComponent).join("/")}`,
+  );
 }
 
 export function launchProject(input: {
@@ -152,4 +167,180 @@ export function verifyAdminCredential(provider: LLMProvider) {
 
 export function deleteAdminCredential(provider: LLMProvider) {
   return apiDelete<{ ok: true }>(`/api/admin/credentials/${provider}`);
+}
+
+// ========== Admin usage & spend ==========
+
+export type AdminUsageTotals = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_estimate: number;
+  calls: number;
+};
+
+export type AdminUsageByProvider = AdminUsageTotals & { provider: string };
+
+export type AdminUsageByUser = {
+  user_id: string | null;
+  github_login: string;
+  cost_estimate: number;
+  calls: number;
+};
+
+export type AdminUsageSummary = {
+  range_days: number;
+  since: string;
+  totals: AdminUsageTotals;
+  by_provider: AdminUsageByProvider[];
+  by_user: AdminUsageByUser[];
+};
+
+export function fetchAdminUsage(days: number) {
+  return apiGet<AdminUsageSummary>(`/api/admin/usage?days=${days}`);
+}
+
+// ========== Admin analytics ==========
+
+export type AdminAnalytics = {
+  range_days: number;
+  since: string;
+  users: {
+    total: number;
+    new_in_range: number;
+    active_in_range: number;
+  };
+  projects: {
+    launched_in_range: number;
+    by_status: Record<string, number>;
+    success_rate: number | null;
+    avg_indexing_seconds: number | null;
+  };
+};
+
+export function fetchAdminAnalytics(days: number) {
+  return apiGet<AdminAnalytics>(`/api/admin/analytics?days=${days}`);
+}
+
+// ========== Admin user management ==========
+
+export type AdminUserSummary = {
+  id: string;
+  github_login: string;
+  email: string | null;
+  role: string;
+  is_active: boolean;
+  created_at: string;
+  project_count: number;
+  integrations: {
+    github: boolean;
+    gitlab: boolean;
+    gitbucket: boolean;
+  };
+};
+
+export type AdminUserList = {
+  total: number;
+  limit: number;
+  offset: number;
+  users: AdminUserSummary[];
+};
+
+export function fetchAdminUsers(limit = 100, offset = 0) {
+  return apiGet<AdminUserList>(`/api/admin/users?limit=${limit}&offset=${offset}`);
+}
+
+export function updateAdminUser(id: string, isActive: boolean) {
+  return apiPatch<{ ok: true; id: string; is_active: boolean }>(`/api/admin/users/${id}`, {
+    is_active: isActive,
+  });
+}
+
+export function deleteAdminUser(id: string) {
+  return apiDelete<{ ok: true; deleted: string }>(`/api/admin/users/${id}`);
+}
+
+// ========== Agent ==========
+
+export type AgentMessageRole = "user" | "assistant";
+
+export type AgentMessage = {
+  id: string;
+  role: AgentMessageRole;
+  content: string;
+  error: string | null;
+  created_at: string | null;
+};
+
+export type AgentChangeStatus = "PROPOSED" | "SUPERSEDED" | "DISMISSED" | "COMMITTED";
+
+export type AgentChange = {
+  id: string;
+  path: string;
+  before_content: string | null;
+  after_content: string;
+  diff: string;
+  status: AgentChangeStatus;
+  edited_by_user: boolean;
+  is_new_file: boolean;
+  updated_at: string | null;
+};
+
+export type AgentHistory = {
+  session_id: string;
+  messages: AgentMessage[];
+  changes: AgentChange[];
+};
+
+export function fetchAgentHistory(projectId: string) {
+  return apiGet<AgentHistory>(`/api/projects/${projectId}/agent/messages`);
+}
+
+export function saveAgentChange(projectId: string, changeId: string, afterContent: string) {
+  return apiPut<AgentChange>(`/api/projects/${projectId}/agent/changes/${changeId}`, {
+    after_content: afterContent,
+  });
+}
+
+export function dismissAgentChange(projectId: string, changeId: string) {
+  return apiPost<{ ok: true }>(`/api/projects/${projectId}/agent/changes/${changeId}/dismiss`);
+}
+
+export type PullRequestResult = {
+  ok: true;
+  number: number;
+  url: string;
+  branch: string;
+  kind: "pull request" | "merge request";
+  committed_files: string[];
+  created_at: string;
+};
+
+export function createPullRequest(
+  projectId: string,
+  input: { title: string; body: string; changeIds: string[]; confirm: boolean },
+) {
+  return apiPost<PullRequestResult>(`/api/projects/${projectId}/pull-request`, {
+    title: input.title,
+    body: input.body,
+    change_ids: input.changeIds,
+    confirm: input.confirm,
+  });
+}
+
+// ========== Admin: agent budget ==========
+
+export type AgentBudget = {
+  daily_budget_usd: string;
+  unlimited: boolean;
+  default: string;
+};
+
+export function fetchAgentBudget() {
+  return apiGet<AgentBudget>("/api/admin/settings/agent-budget");
+}
+
+export function updateAgentBudget(dailyBudgetUsd: string) {
+  return apiPut<{ ok: true; daily_budget_usd: string }>("/api/admin/settings/agent-budget", {
+    daily_budget_usd: dailyBudgetUsd,
+  });
 }

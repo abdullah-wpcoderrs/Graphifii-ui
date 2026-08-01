@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import secrets
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import httpx
@@ -20,7 +20,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from graphify.server.config import get_settings
-from graphify.server.crypto import decrypt, encrypt
+from graphify.server.crypto import encrypt
 from graphify.server.db import get_db
 from graphify.server.git_clients import (
     GitBucketAuthError,
@@ -39,6 +39,7 @@ from graphify.server.sessions import (
     is_secure_cookie,
     read_session_user_id,
 )
+from graphify.server.token_refresh import get_valid_access_token
 
 logger = logging.getLogger("graphify.server.integrations")
 
@@ -241,13 +242,24 @@ async def integration_callback(
             profile = await client.fetch_gitlab_user(token_data.access_token)
             access_ciphertext, access_iv = encrypt(token_data.access_token)
             expires_at = (
-                datetime.now(timezone.utc).replace(microsecond=0)
+                datetime.now(timezone.utc) + timedelta(seconds=token_data.expires_in)
                 if token_data.expires_in
                 else None
             )
             user.gitlab_access_token_ciphertext = access_ciphertext
             user.gitlab_access_token_iv = access_iv
             user.gitlab_access_token_expires_at = expires_at
+            # Phase 5 fix: this was previously dropped on the floor despite
+            # the model having columns for it since Phase 3, which meant
+            # refresh rotation could never work for GitLab no matter what
+            # token_refresh.py did — there was nothing to refresh with.
+            if token_data.refresh_token:
+                refresh_ciphertext, refresh_iv = encrypt(token_data.refresh_token)
+                user.gitlab_refresh_token_ciphertext = refresh_ciphertext
+                user.gitlab_refresh_token_iv = refresh_iv
+            else:
+                user.gitlab_refresh_token_ciphertext = None
+                user.gitlab_refresh_token_iv = None
             user.gitlab_user_id = profile.get("id")
             user.gitlab_login = profile.get("username")
         else:
@@ -310,14 +322,14 @@ async def disconnect_integration(
 
 @router.get("/{provider}/repos")
 async def list_integration_repos(
-    provider: str, user: User = Depends(get_current_user)
+    provider: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> list[dict]:
     provider = _validate_provider(provider)
 
     if provider == "gitlab":
-        if not user.gitlab_access_token_ciphertext or not user.gitlab_access_token_iv:
-            raise HTTPException(status_code=401, detail="GitLab not connected")
-        access_token = decrypt(user.gitlab_access_token_ciphertext, user.gitlab_access_token_iv)
+        access_token = await get_valid_access_token(user, "gitlab", db)
+        if access_token is None:
+            raise HTTPException(status_code=401, detail="GitLab connection expired, please reconnect")
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             try:
                 response = await client.get(
@@ -348,12 +360,12 @@ async def list_integration_repos(
             for p in response.json()
         ]
 
-    if not user.gitbucket_access_token_ciphertext or not user.gitbucket_access_token_iv:
-        raise HTTPException(status_code=401, detail="GitBucket not connected")
     settings = get_settings()
     if not settings.gitbucket_configured:
         raise HTTPException(status_code=400, detail="GitBucket is not configured by the administrator")
-    access_token = decrypt(user.gitbucket_access_token_ciphertext, user.gitbucket_access_token_iv)
+    access_token = await get_valid_access_token(user, "gitbucket", db)
+    if access_token is None:
+        raise HTTPException(status_code=401, detail="GitBucket not connected")
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:
             response = await client.get(

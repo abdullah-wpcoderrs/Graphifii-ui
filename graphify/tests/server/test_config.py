@@ -87,6 +87,28 @@ def test_callback_base_url_prefers_explicit_sandbox_override():
     assert settings.callback_base_url == "https://tunnel.example.com"
 
 
+def test_redis_queue_defaults_are_bounded_and_optional():
+    settings = _settings()
+    assert settings.redis_url is None
+    assert settings.redis_run_queue_stream == "graphify:extraction-runs"
+    assert settings.redis_run_queue_group == "graphify-dispatchers"
+    assert settings.redis_run_queue_block_ms == 2_000
+    assert settings.redis_run_queue_reclaim_seconds == 60
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"redis_run_queue_block_ms": 50},
+        {"redis_run_queue_reclaim_seconds": 10},
+        {"redis_run_queue_max_length": 10},
+    ],
+)
+def test_redis_queue_rejects_unsafe_bounds(overrides):
+    with pytest.raises(ValidationError):
+        _settings(**overrides)
+
+
 def test_github_private_key_rejects_truncated_pem():
     with pytest.raises(ValidationError):
         _settings(github_private_key="-----BEGIN KEY----- no newline")

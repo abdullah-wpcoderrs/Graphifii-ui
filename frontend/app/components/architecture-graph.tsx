@@ -13,36 +13,41 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useMemo, useState } from "react";
-import {
-  WORKSPACE_GRAPH_EDGES,
-  WORKSPACE_GRAPH_NODES,
-  type WorkspaceGraphNode,
-} from "../lib/workspace-fixtures";
+import type { WorkspaceGraphEdge, WorkspaceGraphNode } from "../lib/graph";
 
 type ArchitectureGraphProps = {
+  nodes: WorkspaceGraphNode[];
+  edges: WorkspaceGraphEdge[];
   activeFilePath: string;
   onSelectNode: (node: WorkspaceGraphNode) => void;
   selectedNodeId: string | null;
 };
 
 export default function ArchitectureGraph({
+  nodes: graphNodes,
+  edges: graphEdges,
   activeFilePath,
   onSelectNode,
   selectedNodeId,
 }: ArchitectureGraphProps) {
   const [query, setQuery] = useState("");
-  const [kind, setKind] = useState<"all" | WorkspaceGraphNode["kind"]>("all");
+  const [kind, setKind] = useState<"all" | string>("all");
   const [community, setCommunity] = useState("all");
   const [showEdges, setShowEdges] = useState(true);
 
+  const kinds = useMemo(
+    () => Array.from(new Set(graphNodes.map((node) => node.kind))).sort(),
+    [graphNodes],
+  );
+
   const communities = useMemo(
-    () => Array.from(new Set(WORKSPACE_GRAPH_NODES.map((node) => node.community))),
-    [],
+    () => Array.from(new Set(graphNodes.map((node) => node.community))).sort(),
+    [graphNodes],
   );
 
   const visibleGraphNodes = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return WORKSPACE_GRAPH_NODES.filter((node) => {
+    return graphNodes.filter((node) => {
       const matchesQuery =
         !normalizedQuery ||
         node.label.toLocaleLowerCase().includes(normalizedQuery) ||
@@ -52,7 +57,7 @@ export default function ArchitectureGraph({
         community === "all" || node.community === community;
       return matchesQuery && matchesKind && matchesCommunity;
     });
-  }, [community, kind, query]);
+  }, [community, graphNodes, kind, query]);
 
   const visibleIds = useMemo(
     () => new Set(visibleGraphNodes.map((node) => node.id)),
@@ -63,7 +68,7 @@ export default function ArchitectureGraph({
     () =>
       visibleGraphNodes.map((node) => {
         const isSelected = selectedNodeId === node.id;
-        const matchesFile = activeFilePath === node.filePath;
+        const matchesFile = Boolean(activeFilePath) && activeFilePath === node.filePath;
         const isGodNode = node.centrality === "god";
 
         return {
@@ -74,7 +79,7 @@ export default function ArchitectureGraph({
               <div className="graph-node-content">
                 <span>{node.kind}</span>
                 <strong>{node.label}</strong>
-                <code>{node.filePath}</code>
+                <code>{node.filePath || node.id}</code>
               </div>
             ),
           },
@@ -97,30 +102,26 @@ export default function ArchitectureGraph({
   const edges = useMemo<Edge[]>(
     () =>
       showEdges
-        ? WORKSPACE_GRAPH_EDGES.filter(
-            (edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target),
-          ).map((edge) => ({
-            ...edge,
-            animated: edge.source === selectedNodeId,
-            markerEnd: { type: MarkerType.ArrowClosed },
-            className: "graph-edge",
-            labelStyle: { fill: "#71717a", fontSize: 8 },
-            style: { stroke: "#3f3f46", strokeWidth: 1.2 },
-          }))
+        ? graphEdges
+            .filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target))
+            .map((edge) => ({
+              ...edge,
+              animated: edge.source === selectedNodeId,
+              markerEnd: { type: MarkerType.ArrowClosed },
+              className: "graph-edge",
+              labelStyle: { fill: "#71717a", fontSize: 8 },
+              style: { stroke: "#3f3f46", strokeWidth: 1.2 },
+            }))
         : [],
-    [selectedNodeId, showEdges, visibleIds],
+    [graphEdges, selectedNodeId, showEdges, visibleIds],
   );
 
   const handleNodeClick: NodeMouseHandler = (_, flowNode) => {
-    const sourceNode = WORKSPACE_GRAPH_NODES.find(
-      (node) => node.id === flowNode.id,
-    );
+    const sourceNode = graphNodes.find((node) => node.id === flowNode.id);
     if (sourceNode) onSelectNode(sourceNode);
   };
 
-  const selectedNode = WORKSPACE_GRAPH_NODES.find(
-    (node) => node.id === selectedNodeId,
-  );
+  const selectedNode = graphNodes.find((node) => node.id === selectedNodeId);
 
   return (
     <div className="architecture-graph">
@@ -141,14 +142,14 @@ export default function ArchitectureGraph({
         <select
           aria-label="Filter graph by node type"
           value={kind}
-          onChange={(event) =>
-            setKind(event.target.value as "all" | WorkspaceGraphNode["kind"])
-          }
+          onChange={(event) => setKind(event.target.value)}
         >
           <option value="all">All types</option>
-          <option value="module">Modules</option>
-          <option value="class">Classes</option>
-          <option value="function">Functions</option>
+          {kinds.map((item) => (
+            <option value={item} key={item}>
+              {item}
+            </option>
+          ))}
         </select>
         <select
           aria-label="Filter graph by community"
@@ -234,7 +235,8 @@ export default function ArchitectureGraph({
             <div>
               <dt>Source</dt>
               <dd>
-                {selectedNode.filePath}:{selectedNode.line}
+                {selectedNode.filePath || "unknown"}
+                {selectedNode.filePath ? `:${selectedNode.line}` : ""}
               </dd>
             </div>
           </dl>

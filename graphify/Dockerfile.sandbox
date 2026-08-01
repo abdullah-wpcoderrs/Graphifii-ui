@@ -11,26 +11,27 @@
 # Railway injects every input as an environment variable at deploy time (see
 # graphify/server/sandbox.py) — nothing is baked into the image, so one image
 # serves every project and no secret is ever committed to a layer.
-FROM python:3.12-slim
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+COPY pyproject.toml README.md LICENSE LICENSE-MIT NOTICE /build/
+COPY graphify /build/graphify
+RUN pip wheel --no-cache-dir --wheel-dir /wheels ".[openai,anthropic,gemini]"
+
+FROM python:3.12-slim AS runtime
 
 # git is the only system dependency: the tree-sitter grammars ship as wheels.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-
-# Copy dependency metadata first so `pip install` is cached across source-only
-# changes. Installed before the entrypoint script for the same reason.
-COPY pyproject.toml README.md LICENSE* NOTICE* /app/
-COPY graphify /app/graphify
-
-# [openai,anthropic,gemini] extras: these pull in the actual `openai`/
+# [openai,anthropic,gemini] extras pull in the actual `openai`/
 # `anthropic` SDKs that graphify's community-labeling step needs at runtime.
-# Without them, labeling silently falls back to "Community N" placeholders
-# instead of real AI-generated names — confirmed by a real Railway run on
-# 2026-08-01 (see docs/railway-setup.md "Known gaps").
-RUN pip install --no-cache-dir ".[openai,anthropic,gemini]"
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels \
+        "graphifyy[openai,anthropic,gemini]" \
+    && rm -rf /wheels
 
 COPY scripts/sandbox_entrypoint.py /app/sandbox_entrypoint.py
 

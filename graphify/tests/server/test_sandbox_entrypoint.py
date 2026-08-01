@@ -6,11 +6,13 @@ scripts/sandbox_entrypoint.py is a standalone script run via `python
 sandbox_entrypoint.py` inside the container image, not part of the
 installed graphify package.
 """
+
 from __future__ import annotations
 
 import importlib.util
 import json
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -60,7 +62,9 @@ def test_clone_url_never_contains_token_in_plaintext_form_twice(sbx):
     "env_var,expected_backend",
     [("ANTHROPIC_API_KEY", "claude"), ("OPENAI_API_KEY", "openai"), ("GEMINI_API_KEY", "gemini")],
 )
-def test_detect_llm_backend_maps_env_var_to_backend_name(sbx, monkeypatch, env_var, expected_backend):
+def test_detect_llm_backend_maps_env_var_to_backend_name(
+    sbx, monkeypatch, env_var, expected_backend
+):
     for var in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv(env_var, "some-key-value")
@@ -143,3 +147,65 @@ def test_build_files_json_is_json_serializable(sbx, monkeypatch, tmp_path):
     (tmp_path / "a.py").write_text("x")
     monkeypatch.setattr(sbx, "WORKSPACE", tmp_path)
     json.dumps(sbx.build_files_json())  # must not raise
+
+
+def test_progress_callback_carries_a_unique_event_id(sbx, monkeypatch):
+    captured = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b"{}"
+
+    def fake_urlopen(request, timeout):
+        captured.append((request, timeout))
+        return Response()
+
+    monkeypatch.setenv("GRAPHIFY_CALLBACK_URL", "https://api.example.test/status")
+    monkeypatch.setenv("GRAPHIFY_CALLBACK_SECRET", "per-run-secret")
+    monkeypatch.setattr(sbx.urllib.request, "urlopen", fake_urlopen)
+
+    sbx.report("INDEXING", 50, "working")
+    sbx.report("INDEXING", 60, "still working")
+
+    first = captured[0][0].headers["X-sandbox-event-id"]
+    second = captured[1][0].headers["X-sandbox-event-id"]
+    assert uuid.UUID(first)
+    assert uuid.UUID(second)
+    assert first != second
+
+
+def test_progress_callback_retries_with_the_same_event_id(sbx, monkeypatch):
+    captured_event_ids = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return b"{}"
+
+    def flaky_urlopen(request, timeout):
+        captured_event_ids.append(request.headers["X-sandbox-event-id"])
+        if len(captured_event_ids) < 3:
+            raise OSError("temporary callback failure")
+        return Response()
+
+    monkeypatch.setenv("GRAPHIFY_CALLBACK_URL", "https://api.example.test/status")
+    monkeypatch.setenv("GRAPHIFY_CALLBACK_SECRET", "per-run-secret")
+    monkeypatch.setattr(sbx.urllib.request, "urlopen", flaky_urlopen)
+    monkeypatch.setattr(sbx.time, "sleep", lambda _seconds: None)
+
+    sbx.report("INDEXING", 50, "working")
+
+    assert len(captured_event_ids) == 3
+    assert len(set(captured_event_ids)) == 1
+    assert uuid.UUID(captured_event_ids[0])

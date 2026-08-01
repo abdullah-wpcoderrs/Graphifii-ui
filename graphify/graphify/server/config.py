@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # graphify/server/config.py -> graphify/server -> graphify (package) -> graphify (repo root)
@@ -66,11 +66,6 @@ class Settings(BaseSettings):
     # routes/projects.py reads files.json from alongside it.
     workspace_storage_dir: str = "./workspace-storage"
 
-    # Shared secret the sandbox job presents when POSTing progress back to
-    # /api/internal/projects/{id}/status. Without it that endpoint would let
-    # anyone move any project to READY and point it at an arbitrary graph URL.
-    sandbox_callback_secret: str | None = None
-
     # Public base URL the *sandbox container* uses to reach this backend.
     #
     # Deliberately separate from backend_url. In development they differ:
@@ -83,6 +78,25 @@ class Settings(BaseSettings):
     # In production both are the same public origin and this can be left
     # unset — it falls back to backend_url.
     sandbox_callback_base_url: str | None = None
+
+    # Redis Streams delivers queued run IDs to a worker immediately. PostgreSQL
+    # remains authoritative and is also polled as a recovery path, so Redis may
+    # be omitted for a single-process development deployment.
+    redis_url: str | None = None
+    redis_run_queue_stream: str = "graphify:extraction-runs"
+    redis_run_queue_group: str = "graphify-dispatchers"
+    redis_run_queue_block_ms: int = Field(default=2_000, ge=100, le=60_000)
+    redis_run_queue_reclaim_seconds: int = Field(default=60, ge=30, le=3_600)
+    redis_run_queue_max_length: int = Field(default=10_000, ge=100, le=1_000_000)
+
+    # Enable only in the dedicated worker service in production. It may remain
+    # enabled in the web process for local development. PostgreSQL row locks
+    # and extraction_runs.active_slot remain the final singleton safety fence.
+    run_worker_enabled: bool = True
+    run_worker_poll_seconds: float = Field(default=2.0, ge=0.25, le=60.0)
+    run_worker_lease_seconds: int = Field(default=4 * 60 * 60, ge=300, le=24 * 60 * 60)
+    max_queued_runs_per_user: int = Field(default=3, ge=1, le=100)
+    max_queued_runs_global: int = Field(default=100, ge=1, le=10_000)
 
     # Admin area (Phase 4). Signed with its own secret, deliberately separate
     # from session_secret so an admin cookie cannot be forged from the GitHub
@@ -170,7 +184,11 @@ class Settings(BaseSettings):
 
     @property
     def gitbucket_configured(self) -> bool:
-        return bool(self.gitbucket_instance_url and self.gitbucket_client_id and self.gitbucket_client_secret)
+        return bool(
+            self.gitbucket_instance_url
+            and self.gitbucket_client_id
+            and self.gitbucket_client_secret
+        )
 
 
 @lru_cache

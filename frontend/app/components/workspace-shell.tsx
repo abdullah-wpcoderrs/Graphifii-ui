@@ -3,6 +3,7 @@
 import type { OnMount } from "@monaco-editor/react";
 import dynamic from "next/dynamic";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
   type FormEvent,
   type PointerEvent as ReactPointerEvent,
@@ -19,12 +20,33 @@ import {
   VscMarkdown,
 } from "react-icons/vsc";
 import {
-  INITIAL_AGENT_MESSAGES,
-  OUTPUT_LOGS,
-  WORKSPACE_FILES,
+  createPullRequest,
+  dismissAgentChange,
+  fetchProject,
+  fetchProjectFileContent,
+  fetchProjectFiles,
+  fetchProjectGraph,
+  saveAgentChange,
+  type AgentChange,
   type AgentMessage,
+  type Project,
+} from "../lib/api";
+import { ApiError } from "../lib/api-errors";
+import { getPublicWsUrl } from "../lib/env";
+import {
+  buildFileGroups,
+  buildGraphView,
+  type RawFileTree,
+  type RawGraph,
+  type WorkspaceFileEntry,
+  type WorkspaceFileGroup,
+  type WorkspaceGraphEdge,
   type WorkspaceGraphNode,
-} from "../lib/workspace-fixtures";
+} from "../lib/graph";
+import { AgentDiffDialog } from "./agent-diff-dialog";
+import { ErrorState, Spinner } from "./ui";
+
+const MAX_WS_BACKOFF_MS = 15000;
 
 const MonacoEditor = dynamic(
   () => import("@monaco-editor/react").then((module) => module.Editor),
@@ -33,18 +55,6 @@ const MonacoEditor = dynamic(
     loading: () => (
       <div className="workspace-module-loading" role="status">
         Loading editor…
-      </div>
-    ),
-  },
-);
-
-const MonacoDiffEditor = dynamic(
-  () => import("@monaco-editor/react").then((module) => module.DiffEditor),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="workspace-module-loading" role="status">
-        Preparing diff…
       </div>
     ),
   },
@@ -60,33 +70,45 @@ const ArchitectureGraph = dynamic(() => import("./architecture-graph"), {
 });
 
 type WorkspacePanel = "editor" | "graph" | "agent";
-type EditorMode = "source" | "diff";
 type RightPanelTab = "agent" | "output";
 
 type WorkspaceShellProps = {
   projectId: string;
 };
 
-const FILE_GROUPS = [
-  {
-    label: "graphify",
-    files: WORKSPACE_FILES.filter((file) => file.path.startsWith("graphify/")),
-  },
-  {
-    label: "server",
-    files: WORKSPACE_FILES.filter((file) => file.path.startsWith("server/")),
-  },
-  {
-    label: "root",
-    files: WORKSPACE_FILES.filter((file) => !file.path.includes("/")),
-  },
-];
+type StreamingFile = {
+  before: string | null;
+  after: string;
+  isNewFile: boolean;
+  done: boolean;
+};
 
-const SUGGESTED_PROMPTS = [
-  "Explain the highest-centrality nodes",
-  "Trace extraction progress to the WebSocket",
-  "Find callers of query_graph",
-];
+type AgentConnectionState = "connecting" | "open" | "closed";
+
+type OutputLogEntry = {
+  time: string;
+  tone: "info" | "success";
+  message: string;
+};
+
+type LoadState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "redirecting" }
+  | {
+      status: "ready";
+      project: Project;
+      fileGroups: WorkspaceFileGroup[];
+      totalFiles: number;
+      filesTruncated: boolean;
+      graphNodes: WorkspaceGraphNode[];
+      graphEdges: WorkspaceGraphEdge[];
+      graphCommunityCount: number;
+    };
+
+function nowLabel() {
+  return new Date().toLocaleTimeString([], { hour12: false });
+}
 
 function FileTypeIcon({ language }: { language: string }) {
   if (language === "python") {
@@ -105,7 +127,7 @@ function FileTypeIcon({ language }: { language: string }) {
 function Icon({
   name,
 }: {
-  name: "branch" | "chevron" | "file" | "send" | "stop" | "spark" | "pr";
+  name: "branch" | "chevron" | "file" | "send" | "stop" | "spark";
 }) {
   const paths = {
     branch: (
@@ -131,14 +153,6 @@ function Icon({
         <path d="m16 13 .7 2.3L19 16l-2.3.7L16 19l-.7-2.3L13 16l2.3-.7L16 13Z" />
       </>
     ),
-    pr: (
-      <>
-        <circle cx="5" cy="4" r="2" />
-        <circle cx="5" cy="16" r="2" />
-        <circle cx="15" cy="16" r="2" />
-        <path d="M5 6v8M9 5h2a4 4 0 0 1 4 4v5M9 2 6 5l3 3" />
-      </>
-    ),
   };
 
   return (
@@ -149,28 +163,110 @@ function Icon({
 }
 
 export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
-  const [activeFilePath, setActiveFilePath] = useState(WORKSPACE_FILES[0].path);
-  const [selectedNode, setSelectedNode] =
-    useState<WorkspaceGraphNode | null>(null);
-  const [editorMode, setEditorMode] = useState<EditorMode>("source");
+  const router = useRouter();
+  const [state, setState] = useState<LoadState>({ status: "loading" });
+  const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
+  const [selectedNode, setSelectedNode] = useState<WorkspaceGraphNode | null>(null);
   const [activePanel, setActivePanel] = useState<WorkspacePanel>("editor");
   const [rightTab, setRightTab] = useState<RightPanelTab>("agent");
-  const [messages, setMessages] = useState<AgentMessage[]>(
-    INITIAL_AGENT_MESSAGES,
-  );
+  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [changes, setChanges] = useState<AgentChange[]>([]);
+  const [streamingProse, setStreamingProse] = useState("");
+  const [streamingFiles, setStreamingFiles] = useState<Record<string, StreamingFile>>({});
+  const [agentConnection, setAgentConnection] = useState<AgentConnectionState>("connecting");
+  const [agentError, setAgentError] = useState<string | null>(null);
+  const [showDiffDialog, setShowDiffDialog] = useState(false);
+  const [outputLog, setOutputLog] = useState<OutputLogEntry[]>([]);
   const [prompt, setPrompt] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [logFilter, setLogFilter] = useState("all");
   const [leftWidth, setLeftWidth] = useState(35);
   const [rightWidth, setRightWidth] = useState(25);
+  const [fileContent, setFileContent] = useState<string | null>(null);
+  const [fileContentError, setFileContentError] = useState<string | null>(null);
+  const [fileContentLoading, setFileContentLoading] = useState(false);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
-  const responseTimer = useRef<number | null>(null);
+  const agentSocketRef = useRef<WebSocket | null>(null);
+  const agentRetryTimerRef = useRef<number | null>(null);
+  const agentBackoffRef = useRef(1000);
 
+  function load() {
+    setState({ status: "loading" });
+
+    fetchProject(projectId)
+      .then(async (project) => {
+        if (project.status !== "READY") {
+          setState({ status: "redirecting" });
+          router.replace(`/projects/${projectId}/launch`);
+          return;
+        }
+
+        const [rawGraph, rawFiles] = await Promise.all([
+          fetchProjectGraph(projectId),
+          fetchProjectFiles(projectId).catch(() => null),
+        ]);
+
+        const graphView = buildGraphView((rawGraph ?? {}) as RawGraph);
+        const fileSummary = rawFiles
+          ? buildFileGroups(rawFiles as RawFileTree)
+          : { groups: [], totalFiles: 0, renderedFiles: 0, truncated: false };
+
+        setState({
+          status: "ready",
+          project,
+          fileGroups: fileSummary.groups,
+          totalFiles: fileSummary.totalFiles,
+          filesTruncated: fileSummary.truncated,
+          graphNodes: graphView.nodes,
+          graphEdges: graphView.edges,
+          graphCommunityCount: graphView.communityCount,
+        });
+
+        const log: OutputLogEntry[] = [
+          { time: nowLabel(), tone: "info", message: "Workspace opened." },
+          {
+            time: nowLabel(),
+            tone: "success",
+            message: `graph.json loaded · ${graphView.nodeCount} nodes, ${graphView.edgeCount} links.`,
+          },
+        ];
+        if (rawFiles) {
+          log.push({
+            time: nowLabel(),
+            tone: "success",
+            message: `files.json loaded · ${fileSummary.totalFiles} files${
+              fileSummary.truncated ? " (truncated)" : ""
+            }.`,
+          });
+        }
+        setOutputLog(log);
+
+        const firstFile = fileSummary.groups[0]?.files[0]?.path ?? null;
+        setActiveFilePath(firstFile);
+      })
+      .catch((error) => {
+        setState({
+          status: "error",
+          message:
+            error instanceof ApiError
+              ? error.message
+              : "Could not load this workspace.",
+        });
+      });
+  }
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data load on mount, not a synchronous render-time update
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load() is stable for a given projectId; re-running on its identity would loop
+  }, [projectId]);
+
+  const allFiles: WorkspaceFileEntry[] =
+    state.status === "ready" ? state.fileGroups.flatMap((group) => group.files) : [];
   const activeFile =
-    WORKSPACE_FILES.find((file) => file.path === activeFilePath) ??
-    WORKSPACE_FILES[0];
-  const changedFiles = WORKSPACE_FILES.filter((file) => file.status);
+    allFiles.find((file) => file.path === activeFilePath) ?? allFiles[0] ?? null;
+
   const centerWidth = Math.max(30, 100 - leftWidth - rightWidth);
 
   useEffect(() => {
@@ -196,18 +292,195 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
     );
   }, [leftWidth, projectId, rightWidth]);
 
+  // Real conversation over a real socket: replays history on connect (a
+  // refresh must show the real conversation, not an empty panel), and
+  // reconnects with backoff on an unexpected drop, mirroring the launch
+  // screen's provisioning WebSocket client.
   useEffect(() => {
-    if (!selectedNode || !editorRef.current) return;
-    editorRef.current.revealLineInCenter(selectedNode.line);
-    editorRef.current.setPosition({ lineNumber: selectedNode.line, column: 1 });
-  }, [activeFilePath, selectedNode]);
+    if (state.status !== "ready") return;
 
-  useEffect(
-    () => () => {
-      if (responseTimer.current) window.clearTimeout(responseTimer.current);
-    },
-    [],
-  );
+    const wsBase = getPublicWsUrl();
+    if (!wsBase) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- config validation on mount, not a synchronous render-time update
+      setAgentError("The backend API URL is not configured.");
+      return;
+    }
+
+    let cancelled = false;
+
+    function connect() {
+      if (cancelled) return;
+      setAgentConnection("connecting");
+      const socket = new WebSocket(`${wsBase}/ws/projects/${projectId}/agent`);
+      agentSocketRef.current = socket;
+
+      socket.onopen = () => {
+        if (cancelled) return;
+        setAgentConnection("open");
+        agentBackoffRef.current = 1000;
+      };
+
+      socket.onmessage = (event) => {
+        if (cancelled) return;
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          return;
+        }
+
+        switch (payload.type) {
+          case "history": {
+            setMessages((payload.messages as AgentMessage[]) ?? []);
+            setChanges((payload.changes as AgentChange[]) ?? []);
+            break;
+          }
+          case "user_message": {
+            setMessages((current) => [...current, payload.message as AgentMessage]);
+            break;
+          }
+          case "message_start": {
+            setIsStreaming(true);
+            setStreamingProse("");
+            setStreamingFiles({});
+            setAgentError(null);
+            break;
+          }
+          case "text_token": {
+            setStreamingProse((current) => current + (payload.text as string));
+            break;
+          }
+          case "file_start": {
+            const path = payload.path as string;
+            setStreamingFiles((current) => ({
+              ...current,
+              [path]: {
+                before: (payload.before_content as string | null) ?? null,
+                after: "",
+                isNewFile: Boolean(payload.is_new_file),
+                done: false,
+              },
+            }));
+            break;
+          }
+          case "file_token": {
+            const path = payload.path as string;
+            setStreamingFiles((current) => {
+              const existing = current[path];
+              if (!existing) return current;
+              return { ...current, [path]: { ...existing, after: existing.after + (payload.text as string) } };
+            });
+            break;
+          }
+          case "file_end": {
+            const path = payload.path as string;
+            setStreamingFiles((current) => {
+              const existing = current[path];
+              if (!existing) return current;
+              return { ...current, [path]: { ...existing, done: true } };
+            });
+            break;
+          }
+          case "message_end": {
+            setIsStreaming(false);
+            setMessages((current) => [...current, payload.message as AgentMessage]);
+            const newChanges = (payload.changes as AgentChange[]) ?? [];
+            if (newChanges.length > 0) {
+              setChanges((current) => {
+                const supersededPaths = new Set(newChanges.map((c) => c.path));
+                const kept = current.filter(
+                  (c) => !(supersededPaths.has(c.path) && c.status === "PROPOSED"),
+                );
+                return [...kept, ...newChanges];
+              });
+            }
+            setStreamingProse("");
+            setStreamingFiles({});
+            break;
+          }
+          case "error": {
+            setIsStreaming(false);
+            setAgentError(payload.message as string);
+            break;
+          }
+          default:
+            break;
+        }
+      };
+
+      socket.onclose = (closeEvent) => {
+        if (cancelled) return;
+        setAgentConnection("closed");
+        setIsStreaming(false);
+
+        if (closeEvent.code === 4401) {
+          setAgentError("Your session has expired. Sign in again to continue.");
+          return;
+        }
+        if (closeEvent.code === 4403) {
+          setAgentError("Your account has been suspended.");
+          return;
+        }
+        if (closeEvent.code === 4404) {
+          setAgentError("This project no longer exists.");
+          return;
+        }
+        if (closeEvent.code === 1000) return;
+
+        const delay = Math.min(agentBackoffRef.current, MAX_WS_BACKOFF_MS);
+        agentBackoffRef.current = Math.min(agentBackoffRef.current * 2, MAX_WS_BACKOFF_MS);
+        agentRetryTimerRef.current = window.setTimeout(connect, delay);
+      };
+
+      socket.onerror = () => {
+        socket.close();
+      };
+    }
+
+    connect();
+
+    return () => {
+      cancelled = true;
+      if (agentRetryTimerRef.current) window.clearTimeout(agentRetryTimerRef.current);
+      agentSocketRef.current?.close(1000);
+      agentSocketRef.current = null;
+    };
+  }, [projectId, state.status]);
+
+  // Fetch real file content for the active file — read live from the git
+  // provider (see GET /api/projects/:id/files/{path}), not a stored snapshot.
+  useEffect(() => {
+    if (!activeFile) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing stale content when the selection itself changes, not a render-time update
+      setFileContent(null);
+      setFileContentError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setFileContentLoading(true);
+    setFileContentError(null);
+
+    fetchProjectFileContent(projectId, activeFile.path)
+      .then((result) => {
+        if (cancelled) return;
+        setFileContent(result.content);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setFileContent(null);
+        setFileContentError(
+          error instanceof ApiError ? error.message : "Could not load this file's contents.",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setFileContentLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, activeFile]);
 
   const editorOptions = useMemo(
     () => ({
@@ -217,25 +490,26 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
       lineHeight: 21,
       minimap: { enabled: false },
       padding: { top: 14 },
+      readOnly: true,
       renderLineHighlight: "all" as const,
       scrollBeyondLastLine: false,
       smoothScrolling: true,
-      wordWrap: "off" as const,
+      wordWrap: "on" as const,
     }),
     [],
   );
 
   function openFile(path: string) {
     setActiveFilePath(path);
-    setEditorMode("source");
     setActivePanel("editor");
-    const matchingNode = selectedNode?.filePath === path ? selectedNode : null;
-    setSelectedNode(matchingNode);
+    setSelectedNode((current) => (current?.filePath === path ? current : null));
   }
 
   function handleGraphNode(node: WorkspaceGraphNode) {
     setSelectedNode(node);
-    setActiveFilePath(node.filePath);
+    if (node.filePath && allFiles.some((file) => file.path === node.filePath)) {
+      setActiveFilePath(node.filePath);
+    }
   }
 
   function startResize(
@@ -274,81 +548,92 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
   function submitPrompt(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = prompt.trim();
-    if (!value || isStreaming) return;
+    const socket = agentSocketRef.current;
+    if (!value || isStreaming || agentConnection !== "open" || !socket) return;
 
-    setMessages((current) => [
-      ...current,
-      { id: `user-${Date.now()}`, role: "user", content: value },
-    ]);
+    setAgentError(null);
+    socket.send(JSON.stringify({ type: "user_message", content: value }));
     setPrompt("");
-    setIsStreaming(true);
-
-    responseTimer.current = window.setTimeout(() => {
-      setMessages((current) => [
-        ...current,
-        {
-          id: `assistant-${Date.now()}`,
-          role: "assistant",
-          content:
-            "I traced that request through the Query Engine community. query_graph is the highest-impact entry point; I would inspect its bounded traversal diff before preparing a pull request.",
-        },
-      ]);
-      setIsStreaming(false);
-      responseTimer.current = null;
-    }, 1200);
   }
 
   function stopStreaming() {
-    if (responseTimer.current) window.clearTimeout(responseTimer.current);
-    responseTimer.current = null;
+    // There is no server-side "abort this generation" call in this phase —
+    // the model call already has tokens in flight, and the backend still
+    // persists and bills whatever it produces. This only stops the client
+    // from rendering further tokens for the in-flight turn by reconnecting;
+    // the completed answer will still appear on the next `message_end` or
+    // on the next history replay.
+    agentSocketRef.current?.close(1000);
     setIsStreaming(false);
+    setStreamingProse("");
+    setStreamingFiles({});
   }
 
-  function inspectDiff() {
-    setActiveFilePath("graphify/query.py");
-    setEditorMode("diff");
-    setActivePanel("editor");
+  async function handleSaveChangeEdit(changeId: string, afterContent: string) {
+    const updated = await saveAgentChange(projectId, changeId, afterContent);
+    setChanges((current) => current.map((change) => (change.id === updated.id ? updated : change)));
+  }
+
+  async function handleDismissChange(changeId: string) {
+    await dismissAgentChange(projectId, changeId);
+    setChanges((current) => current.filter((change) => change.id !== changeId));
+  }
+
+  async function handleDispatchPullRequest(input: {
+    title: string;
+    body: string;
+    changeIds: string[];
+  }) {
+    const result = await createPullRequest(projectId, { ...input, confirm: true });
+    setChanges((current) => current.filter((change) => !input.changeIds.includes(change.id)));
+    setShowDiffDialog(false);
+    setOutputLog((current) => [
+      ...current,
+      {
+        time: nowLabel(),
+        tone: "success",
+        message: `Opened ${result.kind} #${result.number} on branch ${result.branch}: ${result.url}`,
+      },
+    ]);
+  }
+
+  if (state.status === "loading" || state.status === "redirecting") {
+    return (
+      <main className="workspace-page workspace-page-centered">
+        <Spinner size="lg" label="Loading workspace" />
+      </main>
+    );
+  }
+
+  if (state.status === "error") {
+    return (
+      <main className="workspace-page workspace-page-centered">
+        <ErrorState title="Could not load this workspace" description={state.message} onRetry={load} />
+      </main>
+    );
   }
 
   const filteredLogs =
-    logFilter === "all"
-      ? OUTPUT_LOGS
-      : OUTPUT_LOGS.filter((log) => log.tone === logFilter);
+    logFilter === "all" ? outputLog : outputLog.filter((log) => log.tone === logFilter);
 
   return (
     <main className="workspace-page">
       <header className="workspace-header">
         <div className="workspace-repository">
-          <Link href="/dashboard" aria-label="Return to repository dashboard">
+          <Link href="/dashboard" aria-label="Return to dashboard">
             <span aria-hidden="true">G</span>
           </Link>
-          <strong>Graphify-Labs/graphify</strong>
-          <button type="button" aria-label="Change active branch">
-            <Icon name="branch" />
-            main
-            <Icon name="chevron" />
-          </button>
+          <strong>{state.project.repo_name}</strong>
         </div>
 
         <div className="workspace-connection" role="status">
           <i aria-hidden="true" />
-          Graph ready · 9,416 nodes
+          Graph ready · {state.graphNodes.length} nodes
         </div>
 
         <div className="workspace-header-actions">
-          <span>{changedFiles.length} changed</span>
-          <Link href="/admin/credentials">Admin</Link>
-          <button
-            className="workspace-pr-button"
-            type="button"
-            onClick={() => {
-              setRightTab("agent");
-              setActivePanel("agent");
-            }}
-          >
-            <Icon name="pr" />
-            Create Pull Request
-          </button>
+          <span>{state.totalFiles} files</span>
+          {state.filesTruncated && <span title="Only part of the tree loaded">Truncated</span>}
         </div>
       </header>
 
@@ -381,102 +666,82 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
           <aside className="file-explorer">
             <header>
               <span>Explorer</span>
-              <strong>{changedFiles.length}</strong>
+              <strong>{state.totalFiles}</strong>
             </header>
             <div className="file-tree">
-              {FILE_GROUPS.map((group) => (
-                <details open key={group.label}>
-                  <summary>
-                    <VscChevronRight
-                      aria-hidden="true"
-                      className="tree-chevron"
-                    />
-                    <VscFolderOpened
-                      aria-hidden="true"
-                      className="folder-type-icon"
-                    />
-                    <span>{group.label}</span>
-                  </summary>
-                  {group.files.map((file) => (
-                    <button
-                      className={activeFilePath === file.path ? "is-active" : ""}
-                      key={file.path}
-                      type="button"
-                      onClick={() => openFile(file.path)}
-                    >
-                      <FileTypeIcon language={file.language} />
-                      <span>{file.name}</span>
-                      {file.status && <i aria-label={file.status} />}
-                    </button>
-                  ))}
-                </details>
-              ))}
+              {state.fileGroups.length === 0 ? (
+                <p className="workspace-empty-note">No files were reported for this repository.</p>
+              ) : (
+                state.fileGroups.map((group) => (
+                  <details open key={group.label}>
+                    <summary>
+                      <VscChevronRight
+                        aria-hidden="true"
+                        className="tree-chevron"
+                      />
+                      <VscFolderOpened
+                        aria-hidden="true"
+                        className="folder-type-icon"
+                      />
+                      <span>{group.label}</span>
+                    </summary>
+                    {group.files.map((file) => (
+                      <button
+                        className={activeFilePath === file.path ? "is-active" : ""}
+                        key={file.path}
+                        type="button"
+                        onClick={() => openFile(file.path)}
+                      >
+                        <FileTypeIcon language={file.language} />
+                        <span>{file.name}</span>
+                      </button>
+                    ))}
+                  </details>
+                ))
+              )}
             </div>
           </aside>
 
           <div className="editor-workbench">
             <div className="editor-tabs">
-              <button className="is-active" type="button">
-                <FileTypeIcon language={activeFile.language} />
-                {activeFile.name}
-                {activeFile.status && <i />}
-              </button>
-              <div className="editor-mode-switch" aria-label="Editor view">
-                <button
-                  className={editorMode === "source" ? "is-active" : ""}
-                  type="button"
-                  onClick={() => setEditorMode("source")}
-                >
-                  Source
+              {activeFile ? (
+                <button className="is-active" type="button">
+                  <FileTypeIcon language={activeFile.language} />
+                  {activeFile.name}
                 </button>
-                <button
-                  className={editorMode === "diff" ? "is-active" : ""}
-                  disabled={!activeFile.originalContent}
-                  type="button"
-                  onClick={() => setEditorMode("diff")}
-                >
-                  Diff
-                </button>
-              </div>
+              ) : (
+                <span className="editor-tabs-empty">No file selected</span>
+              )}
             </div>
 
             <div className="editor-surface">
-              {editorMode === "diff" && activeFile.originalContent ? (
-                <MonacoDiffEditor
-                  language={activeFile.language}
-                  modified={activeFile.content}
-                  original={activeFile.originalContent}
-                  options={{
-                    ...editorOptions,
-                    renderSideBySide: false,
-                    readOnly: true,
-                  }}
-                  theme="vs-dark"
-                />
-              ) : (
+              {activeFile && fileContentLoading ? (
+                <div className="workspace-module-loading" role="status">
+                  Loading {activeFile.name}…
+                </div>
+              ) : activeFile && fileContentError ? (
+                <div className="workspace-empty-note">{fileContentError}</div>
+              ) : activeFile ? (
                 <MonacoEditor
                   language={activeFile.language}
                   onMount={(editor) => {
                     editorRef.current = editor;
-                    if (selectedNode?.filePath === activeFile.path) {
-                      editor.revealLineInCenter(selectedNode.line);
-                      editor.setPosition({
-                        lineNumber: selectedNode.line,
-                        column: 1,
-                      });
-                    }
                   }}
                   options={editorOptions}
                   path={activeFile.path}
                   theme="vs-dark"
-                  value={activeFile.content}
+                  value={fileContent ?? ""}
                 />
+              ) : (
+                <div className="workspace-empty-note">
+                  Select a file from the explorer to see its details.
+                </div>
               )}
             </div>
             <footer className="editor-statusbar">
-              <span>{activeFile.language}</span>
-              <span>UTF-8</span>
-              {selectedNode && selectedNode.filePath === activeFile.path && (
+              <span>{activeFile?.language ?? "—"}</span>
+              {activeFile && <span>{activeFile.size.toLocaleString()} bytes</span>}
+              {selectedNode && selectedNode.filePath === activeFile?.path && (
                 <span>
                   Ln {selectedNode.line} · {selectedNode.label}
                 </span>
@@ -502,12 +767,16 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
           <header className="workspace-pane-header">
             <div>
               <span>Architecture</span>
-              <strong>Query Engine · 6 visible nodes</strong>
+              <strong>
+                {state.graphCommunityCount} communities · {state.graphNodes.length} nodes
+              </strong>
             </div>
             <span>graph.json</span>
           </header>
           <ArchitectureGraph
-            activeFilePath={activeFilePath}
+            nodes={state.graphNodes}
+            edges={state.graphEdges}
+            activeFilePath={activeFilePath ?? ""}
             onSelectNode={handleGraphNode}
             selectedNodeId={selectedNode?.id ?? null}
           />
@@ -555,72 +824,92 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
                   <Icon name="spark" />
                   <div>
                     <strong>Graph context attached</strong>
-                    <span>Query Engine · 6 nodes · 5 edges</span>
+                    <span>
+                      {state.graphNodes.length} nodes · {state.graphEdges.length} edges
+                      {agentConnection !== "open" && ` · ${agentConnection}…`}
+                    </span>
                   </div>
                 </div>
 
                 {messages.map((message) => (
-                  <article
-                    className={`agent-message is-${message.role}`}
-                    key={message.id}
-                  >
+                  <article className={`agent-message is-${message.role}`} key={message.id}>
                     <span>{message.role === "assistant" ? "Graphify" : "You"}</span>
-                    <p>{message.content}</p>
+                    {message.error ? <p className="agent-message-error">{message.error}</p> : null}
+                    {message.content && <p>{message.content}</p>}
                   </article>
                 ))}
 
                 {isStreaming && (
-                  <article
-                    className="agent-message is-assistant is-streaming"
-                    role="status"
-                  >
+                  <article className="agent-message is-assistant is-streaming" role="status">
                     <span>Graphify</span>
                     <p>
-                      Tracing graph relationships
-                      <i />
-                      <i />
-                      <i />
+                      {streamingProse || "Tracing graph relationships"}
+                      {!streamingProse && (
+                        <>
+                          <i />
+                          <i />
+                          <i />
+                        </>
+                      )}
                     </p>
+                    {Object.entries(streamingFiles).map(([path, file]) => (
+                      <p className="agent-streaming-file" key={path}>
+                        {file.done ? "Proposed change to " : "Writing "}
+                        <code>{path}</code>
+                        {file.isNewFile && " (new file)"}
+                      </p>
+                    ))}
                   </article>
                 )}
 
-                <section className="agent-change-card">
-                  <header>
-                    <div>
-                      <span>Proposed changes</span>
-                      <strong>{changedFiles.length} files</strong>
-                    </div>
-                    <span>+18 −4</span>
-                  </header>
-                  <ul>
-                    {changedFiles.map((file) => (
-                      <li key={file.path}>
-                        <FileTypeIcon language={file.language} />
-                        <span>{file.path}</span>
-                        <i>{file.status}</i>
-                      </li>
-                    ))}
-                  </ul>
-                  <div>
-                    <button type="button" onClick={inspectDiff}>
-                      Inspect Diff
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPrompt(
-                          "Prepare a pull request summary for the proposed changes.",
-                        );
-                      }}
-                    >
-                      Prepare Pull Request
-                    </button>
-                  </div>
-                </section>
+                {agentError && (
+                  <p className="agent-message-error" role="alert">
+                    {agentError}
+                  </p>
+                )}
               </div>
 
+              {changes.filter((change) => change.status === "PROPOSED").length > 0 && (
+                <div className="agent-change-card">
+                  <header>
+                    <div>
+                      <strong>Proposed changes</strong>
+                      <span>
+                        {changes.filter((change) => change.status === "PROPOSED").length} file
+                        {changes.filter((change) => change.status === "PROPOSED").length === 1
+                          ? ""
+                          : "s"}
+                      </span>
+                    </div>
+                  </header>
+                  <ul>
+                    {changes
+                      .filter((change) => change.status === "PROPOSED")
+                      .map((change) => (
+                        <li key={change.id}>
+                          <Icon name="file" />
+                          <span>{change.path}</span>
+                          {change.edited_by_user && <i>edited</i>}
+                        </li>
+                      ))}
+                  </ul>
+                  <div>
+                    <button type="button" onClick={() => setShowDiffDialog(true)}>
+                      Review changes
+                    </button>
+                    <button type="button" onClick={() => setShowDiffDialog(true)}>
+                      Prepare PR
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="agent-suggestions" aria-label="Suggested queries">
-                {SUGGESTED_PROMPTS.map((suggestion) => (
+                {[
+                  "Explain the highest-centrality nodes",
+                  "Summarize the largest community",
+                  "Which nodes have no incoming edges?",
+                ].map((suggestion) => (
                   <button
                     type="button"
                     key={suggestion}
@@ -642,7 +931,9 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
                   />
                 </label>
                 <div>
-                  <span>Graph-aware context enabled</span>
+                  <span>
+                    {agentConnection === "open" ? "Graph-aware context enabled" : "Reconnecting…"}
+                  </span>
                   {isStreaming ? (
                     <button
                       aria-label="Stop generation"
@@ -654,7 +945,7 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
                   ) : (
                     <button
                       aria-label="Send prompt"
-                      disabled={!prompt.trim()}
+                      disabled={!prompt.trim() || agentConnection !== "open"}
                       type="submit"
                     >
                       <Icon name="send" />
@@ -675,7 +966,6 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
                   <option value="all">All events</option>
                   <option value="info">Info</option>
                   <option value="success">Success</option>
-                  <option value="tool">Tools</option>
                 </select>
               </div>
               <div className="output-log-lines" aria-live="polite">
@@ -691,6 +981,19 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
           )}
         </section>
       </div>
+
+      {showDiffDialog && (
+        <AgentDiffDialog
+          changes={changes.filter((change) => change.status === "PROPOSED")}
+          repoName={state.project.repo_name}
+          defaultBranch={state.project.default_branch}
+          changeRequestNoun={state.project.provider === "gitlab" ? "merge request" : "pull request"}
+          onSaveEdit={handleSaveChangeEdit}
+          onDismiss={handleDismissChange}
+          onDispatch={handleDispatchPullRequest}
+          onClose={() => setShowDiffDialog(false)}
+        />
+      )}
     </main>
   );
 }

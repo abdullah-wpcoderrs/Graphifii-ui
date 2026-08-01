@@ -68,6 +68,7 @@ async def record_usage(
     completion_tokens: int = 0,
     user_id: UUID | None = None,
     project_id: UUID | None = None,
+    run_id: UUID | None = None,
     cost_estimate: Decimal | None = None,
 ) -> None:
     """Append one usage row. Never raises — see module docstring."""
@@ -81,6 +82,7 @@ async def record_usage(
             UsageEvent(
                 user_id=user_id,
                 project_id=project_id,
+                run_id=run_id,
                 provider=provider,
                 model=model,
                 operation=operation,

@@ -1,24 +1,19 @@
 """Railway ephemeral job launch for sandbox provisioning.
 
 Railway has no plain "run a one-off job with these env vars" endpoint —
-everything goes through its GraphQL API
-(https://backboard.railway.app/graphql/v2), and a service's environment
+everything goes through its GraphQL API, and a service's environment
 variables and its deploy trigger are two separate calls, not one. The shapes
-below were confirmed by introspecting Railway's live schema on 2026-08-01
-(the API can describe its own rules on request via a `__type` query) after
-an earlier version, guessed from documentation prose, was rejected outright
-by Railway's GraphQL validator. Concretely:
+below follow Railway's public API documentation as of 2026-08-01. Concretely:
 
   1. variableCollectionUpsert(input: {...}) sets this deploy's env vars,
      with skipDeploys: true so setting them doesn't trigger a second,
      unwanted deploy on top of the explicit one below.
-  2. serviceInstanceDeploy(serviceId, environmentId) triggers the deploy.
-     It takes plain arguments, not a bundled `input` object, and returns
-     nothing useful (a bare Boolean) — it does NOT hand back a deployment id.
-  3. deployments(input: {...}, first: 1) is queried afterward to find the
-     deployment that resulted, so Project.sandbox_id has something to record.
-     This is best-effort tracking, not part of the critical path: if it
-     comes back empty the deploy still happened, we just have no id for it.
+  2. serviceInstanceDeployV2(serviceId, environmentId) triggers the deploy
+     and returns its exact deployment id. The older Boolean mutation and
+     "latest deployment" lookup are intentionally not used: they cannot
+     safely correlate concurrent control-plane activity.
+  3. deploymentCancel/deploymentStop terminate queued/building or running
+     deployments by that exact id.
 """
 
 from __future__ import annotations
@@ -27,7 +22,7 @@ import httpx
 
 from graphify.server.config import get_settings
 
-RAILWAY_GRAPHQL_URL = "https://backboard.railway.app/graphql/v2"
+RAILWAY_GRAPHQL_URL = "https://backboard.railway.com/graphql/v2"
 _TIMEOUT = 30.0
 
 
@@ -41,6 +36,10 @@ class RailwayNotConfiguredError(RailwayError):
 
 class RailwayUnavailableError(RailwayError):
     """Railway could not be reached, or returned a server error."""
+
+
+class RailwayLaunchUncertainError(RailwayError):
+    """The deploy trigger may have succeeded but no exact id was received."""
 
 
 async def _graphql(client: httpx.AsyncClient, token: str, query: str, variables: dict) -> dict:
@@ -69,35 +68,42 @@ mutation VariableCollectionUpsert($input: VariableCollectionUpsertInput!) {
 """
 
 _TRIGGER_DEPLOY = """
-mutation ServiceInstanceDeploy($serviceId: String!, $environmentId: String!) {
-  serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+mutation ServiceInstanceDeployV2($serviceId: String!, $environmentId: String!) {
+  serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
 }
 """
 
-_LATEST_DEPLOYMENT = """
-query LatestDeployment($input: DeploymentListInput!) {
-  deployments(input: $input, first: 1) {
-    edges { node { id status createdAt } }
-  }
+_CANCEL_DEPLOYMENT = """
+mutation DeploymentCancel($id: String!) {
+  deploymentCancel(id: $id)
+}
+"""
+
+_STOP_DEPLOYMENT = """
+mutation DeploymentStop($id: String!) {
+  deploymentStop(id: $id)
 }
 """
 
 
 async def launch_project_on_railway(
     project_id: str,
+    run_id: str,
     repo_url: str,
+    default_branch: str,
     active_llm_provider: str,
     active_llm_key: str,
+    callback_secret: str,
     repo_token: str | None = None,
 ) -> dict:
     """Trigger an ephemeral Railway job that clones repo_url and runs
     `graphify update /workspace` inside it. Returns
-    {"id": <deployment id or None>} so Project.sandbox_id can be recorded.
+    {"id": <deployment id>} so the run can be canceled and reconciled by
+    exact identity.
 
-    The job reports its own progress back to
-    POST /api/internal/projects/{id}/status using SANDBOX_CALLBACK_SECRET;
-    the WebSocket endpoint reads that persisted state rather than talking to
-    Railway itself.
+    The job reports progress to the run-scoped callback URL using the random
+    per-run credential supplied by the dispatcher; the WebSocket reads the
+    persisted projection rather than talking to Railway itself.
 
     repo_token is the user's decrypted git provider token, needed to clone
     private repositories. It is passed as a job env var over Railway's HTTPS
@@ -114,12 +120,16 @@ async def launch_project_on_railway(
     env_vars = {
         "REPO_URL": repo_url,
         "PROJECT_ID": project_id,
+        "RUN_ID": run_id,
+        "REPO_BRANCH": default_branch,
         "WORKSPACE_STORAGE_TYPE": settings.workspace_storage_type,
         # callback_base_url, not backend_url: in dev the container reaches us
         # through a tunnel while backend_url stays localhost for OAuth and
         # cookie purposes. See config.py.
-        "GRAPHIFY_CALLBACK_URL": f"{settings.callback_base_url}/api/internal/projects/{project_id}/status",
-        "GRAPHIFY_CALLBACK_SECRET": settings.sandbox_callback_secret or "",
+        "GRAPHIFY_CALLBACK_URL": (
+            f"{settings.callback_base_url}/api/internal/projects/{project_id}/runs/{run_id}/status"
+        ),
+        "GRAPHIFY_CALLBACK_SECRET": callback_secret,
         f"{active_llm_provider.upper()}_API_KEY": active_llm_key,
     }
     if repo_token:
@@ -148,38 +158,74 @@ async def launch_project_on_railway(
             },
         )
 
-        # Step 2: trigger the deploy. Returns a bare boolean, not an id.
-        await _graphql(
-            client,
-            token,
-            _TRIGGER_DEPLOY,
-            {
-                "serviceId": settings.railway_service_id,
-                "environmentId": settings.railway_environment_id,
-            },
-        )
-
-        # Step 3: best-effort lookup of the deployment that resulted, purely
-        # so Project.sandbox_id has something to show in the UI. A failure
-        # here must not fail the launch — the job is already running.
-        deployment_id = None
+        # Step 2: trigger the deploy and capture its exact id atomically.
         try:
             result = await _graphql(
                 client,
                 token,
-                _LATEST_DEPLOYMENT,
+                _TRIGGER_DEPLOY,
                 {
-                    "input": {
-                        "projectId": settings.railway_project_id,
-                        "serviceId": settings.railway_service_id,
-                        "environmentId": settings.railway_environment_id,
-                    }
+                    "serviceId": settings.railway_service_id,
+                    "environmentId": settings.railway_environment_id,
                 },
             )
-            edges = result.get("deployments", {}).get("edges", [])
-            if edges:
-                deployment_id = edges[0]["node"]["id"]
-        except RailwayError:
-            pass
+        except RailwayError as exc:
+            raise RailwayLaunchUncertainError(
+                "Railway deploy trigger outcome is unknown; manual reconciliation is required"
+            ) from exc
+
+        deployment_id = result.get("serviceInstanceDeployV2")
+        if not isinstance(deployment_id, str) or not deployment_id:
+            raise RailwayLaunchUncertainError(
+                "Railway triggered a deploy without returning its deployment id"
+            )
 
     return {"id": deployment_id}
+
+
+async def cancel_deployment_on_railway(deployment_id: str) -> None:
+    """Cancel a queued/building deploy or stop it after it starts running."""
+    settings = get_settings()
+    if not settings.railway_configured:
+        raise RailwayNotConfiguredError("Railway sandbox provisioning is not configured")
+
+    token = settings.railway_api_token
+    assert token is not None
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        try:
+            await _graphql(client, token, _CANCEL_DEPLOYMENT, {"id": deployment_id})
+            return
+        except RailwayError:
+            try:
+                await _graphql(client, token, _STOP_DEPLOYMENT, {"id": deployment_id})
+                return
+            except RailwayError as stop_error:
+                raise RailwayError(
+                    f"Railway could neither cancel nor stop deployment {deployment_id}"
+                ) from stop_error
+
+
+async def clear_sandbox_variables_on_railway() -> None:
+    """Remove per-run credentials and repository inputs from shared config."""
+    settings = get_settings()
+    if not settings.railway_configured:
+        raise RailwayNotConfiguredError("Railway sandbox provisioning is not configured")
+
+    token = settings.railway_api_token
+    assert token is not None
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        await _graphql(
+            client,
+            token,
+            _SET_VARIABLES,
+            {
+                "input": {
+                    "projectId": settings.railway_project_id,
+                    "environmentId": settings.railway_environment_id,
+                    "serviceId": settings.railway_service_id,
+                    "variables": {},
+                    "replace": True,
+                    "skipDeploys": True,
+                }
+            },
+        )

@@ -4,7 +4,7 @@ Three pieces that share one state machine:
 
   POST /api/projects                      user starts an extraction
   POST /api/projects/{id}/cancel          user aborts one mid-flight
-  POST /api/internal/projects/{id}/status the sandbox job reports progress
+  POST /api/internal/projects/{id}/runs/{run_id}/status reports progress
   WS   /ws/projects/{id}                  the browser watches it happen
 
 Progress is persisted on Project (progress_percent/status_message/...) and
@@ -20,11 +20,11 @@ runs more than one instance.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Literal
 
 from fastapi import (
     APIRouter,
@@ -32,29 +32,48 @@ from fastapi import (
     File,
     Header,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from graphify.server.config import get_settings
 from graphify.server.crypto import decrypt
 from graphify.server.db import get_db, get_session_factory
-from graphify.server.models import Project, ProjectStatus, SystemCredential, User
+from graphify.server.models import (
+    ExtractionCallbackEvent,
+    ExtractionRun,
+    ExtractionRunStatus,
+    Project,
+    ProjectStatus,
+    SystemCredential,
+    UsageEvent,
+    User,
+)
+from graphify.server.run_service import (
+    OPEN_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    callback_secret_matches,
+    finish_run,
+    project_from_run,
+    transition_allowed,
+)
 from graphify.server.sandbox import (
     RailwayError,
-    RailwayNotConfiguredError,
-    launch_project_on_railway,
+    cancel_deployment_on_railway,
+    clear_sandbox_variables_on_railway,
 )
 from graphify.server.sessions import (
     SESSION_COOKIE_NAME,
     get_current_user,
     read_session_user_id,
 )
-from graphify.server.usage import record_usage
+from graphify.server.usage import estimate_cost
 
 logger = logging.getLogger("graphify.server.launch")
 
@@ -62,7 +81,6 @@ router = APIRouter(tags=["launch"])
 
 # Terminal states — nothing further is streamed once a project reaches one.
 _TERMINAL = {ProjectStatus.READY, ProjectStatus.FAILED}
-_IN_FLIGHT = {ProjectStatus.CLONING, ProjectStatus.INDEXING}
 
 _POLL_INTERVAL_SECONDS = 1.0
 # Stop streaming a project that never terminates rather than holding the
@@ -70,6 +88,10 @@ _POLL_INTERVAL_SECONDS = 1.0
 _MAX_STREAM_SECONDS = 60 * 30
 
 _VALID_PROVIDERS = {"github", "gitlab", "gitbucket"}
+
+# Serializes queue admission across app replicas so quotas and the
+# per-repository current-run check cannot be raced by parallel requests.
+_LAUNCH_ADVISORY_LOCK = 2_026_080_101
 
 # Cap per uploaded artifact. A graph for a very large repo is a few MB; 256MB
 # is generous while still bounding what one sandbox can write to disk.
@@ -86,6 +108,7 @@ class LaunchRequest(BaseModel):
 def _serialize_progress(project: Project) -> dict:
     return {
         "project_id": str(project.id),
+        "run_id": str(project.current_run_id) if project.current_run_id else None,
         "status": project.status.value,
         "progress_percent": project.progress_percent,
         "message": project.status_message,
@@ -133,6 +156,7 @@ def _decrypt_repo_token(user: User, provider: str) -> str | None:
 
 @router.post("/api/projects")
 async def launch_project(
+    request: Request,
     payload: LaunchRequest,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -140,11 +164,42 @@ async def launch_project(
     if payload.provider not in _VALID_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"unknown provider {payload.provider!r}")
 
+    settings = get_settings()
+    if not settings.railway_configured:
+        raise HTTPException(
+            status_code=503, detail="Railway sandbox provisioning is not configured"
+        )
+
+    await db.execute(select(func.pg_advisory_xact_lock(_LAUNCH_ADVISORY_LOCK)))
+
+    # Queue limits are enforced from trusted database state, not a client
+    # counter. They cap both accidental storms and deliberate spend abuse.
+    global_open = (
+        await db.execute(
+            select(func.count())
+            .select_from(ExtractionRun)
+            .where(ExtractionRun.status.in_(OPEN_RUN_STATUSES))
+        )
+    ).scalar_one()
+    if global_open >= settings.max_queued_runs_global:
+        raise HTTPException(status_code=429, detail="the extraction queue is full")
+
+    user_open = (
+        await db.execute(
+            select(func.count())
+            .select_from(ExtractionRun)
+            .join(Project, Project.id == ExtractionRun.project_id)
+            .where(Project.user_id == user.id, ExtractionRun.status.in_(OPEN_RUN_STATUSES))
+        )
+    ).scalar_one()
+    if user_open >= settings.max_queued_runs_per_user:
+        raise HTTPException(status_code=429, detail="too many extraction runs are queued")
+
     existing = (
         await db.execute(
-            select(Project).where(
-                Project.user_id == user.id, Project.repo_name == payload.repo_full_name
-            )
+            select(Project)
+            .where(Project.user_id == user.id, Project.repo_name == payload.repo_full_name)
+            .with_for_update()
         )
     ).scalar_one_or_none()
 
@@ -152,31 +207,51 @@ async def launch_project(
     # at most one project per user. Re-launching therefore reuses that row
     # rather than creating a second one — but never interrupts a run already
     # in flight, which would orphan the running Railway job.
-    if existing is not None and existing.status in _IN_FLIGHT:
-        raise HTTPException(
-            status_code=409,
-            detail="this repository is already being indexed",
-            headers={"X-Project-Id": str(existing.id)},
-        )
+    if existing is not None and existing.current_run_id is not None:
+        current = await db.get(ExtractionRun, existing.current_run_id)
+        if current is not None and current.status in OPEN_RUN_STATUSES:
+            raise HTTPException(
+                status_code=409,
+                detail="this repository is already queued or being indexed",
+                headers={"X-Project-Id": str(existing.id)},
+            )
 
     credential = await _active_llm_credential(db)
-    llm_key = decrypt(credential.key_ciphertext, credential.key_iv)
-    repo_token = _decrypt_repo_token(user, payload.provider)
 
     if existing is not None:
         project = existing
         project.status = ProjectStatus.CLONING
         project.repo_url = payload.repo_url
         project.default_branch = payload.default_branch
+        project.provider = payload.provider
     else:
         project = Project(
             user_id=user.id,
             repo_name=payload.repo_full_name,
             repo_url=payload.repo_url,
             default_branch=payload.default_branch,
+            provider=payload.provider,
             status=ProjectStatus.CLONING,
         )
         db.add(project)
+
+    await db.flush()
+
+    run = ExtractionRun(
+        project_id=project.id,
+        status=ExtractionRunStatus.QUEUED,
+        repo_url=payload.repo_url,
+        repo_full_name=payload.repo_full_name,
+        provider=payload.provider,
+        default_branch=payload.default_branch,
+        llm_provider=credential.provider,
+        llm_model=credential.model,
+        progress_percent=0,
+        status_message="Queued for provisioning",
+    )
+    db.add(run)
+    await db.flush()
+    project.current_run_id = run.id
 
     # Reset progress from any previous run so the UI never shows stale
     # percentages or a prior failure's error text.
@@ -184,40 +259,20 @@ async def launch_project(
     project.status_message = "Queued for provisioning"
     project.error_message = None
     project.graph_json_url = None
-    project.started_at = datetime.now(timezone.utc)
+    project.started_at = None
     project.finished_at = None
-
-    # Commit before calling Railway so the project id exists for the job's
-    # callback URL, and so a Railway timeout cannot lose the row entirely.
     await db.commit()
     await db.refresh(project)
 
-    try:
-        result = await launch_project_on_railway(
-            project_id=str(project.id),
-            repo_url=payload.repo_url,
-            active_llm_provider=credential.provider,
-            active_llm_key=llm_key,
-            repo_token=repo_token,
-        )
-    except RailwayNotConfiguredError as exc:
-        project.status = ProjectStatus.FAILED
-        project.error_message = str(exc)
-        project.finished_at = datetime.now(timezone.utc)
-        await db.commit()
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except RailwayError as exc:
-        logger.error("Railway launch failed for project %s: %s", project.id, exc)
-        project.status = ProjectStatus.FAILED
-        project.error_message = "Could not start the extraction sandbox"
-        project.finished_at = datetime.now(timezone.utc)
-        await db.commit()
-        raise HTTPException(status_code=502, detail="Could not start the extraction sandbox") from exc
-
-    project.sandbox_id = str(result.get("id") or "") or None
-    project.status_message = "Sandbox starting"
-    await db.commit()
-    await db.refresh(project)
+    # Redis is delivery acceleration, not the source of truth. If enqueueing
+    # fails, the committed QUEUED row is still discovered by the worker's
+    # PostgreSQL fallback scan.
+    run_queue = getattr(request.app.state, "run_queue", None)
+    if run_queue is not None:
+        try:
+            await run_queue.enqueue(run.id)
+        except Exception:  # noqa: BLE001 - durable DB fallback is intentional
+            logger.exception("could not notify Redis about queued run %s", run.id)
 
     return _serialize_progress(project)
 
@@ -230,98 +285,184 @@ async def cancel_project(
 ) -> dict:
     project = (
         await db.execute(
-            select(Project).where(Project.id == project_id, Project.user_id == user.id)
+            select(Project)
+            .where(Project.id == project_id, Project.user_id == user.id)
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
 
-    if project.status in _TERMINAL:
+    if project.current_run_id is None:
         raise HTTPException(status_code=409, detail="project has already finished")
 
-    # Marks the project failed so the UI stops waiting. The Railway job is
-    # not torn down here — sandbox teardown is Phase 7 scope; the job will
-    # run to completion and its callback will be ignored (see below).
-    project.status = ProjectStatus.FAILED
-    project.error_message = "Canceled by user"
-    project.status_message = None
-    project.finished_at = datetime.now(timezone.utc)
+    run = (
+        await db.execute(
+            select(ExtractionRun)
+            .where(ExtractionRun.id == project.current_run_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if run is None or run.status in TERMINAL_RUN_STATUSES:
+        raise HTTPException(status_code=409, detail="project has already finished")
+
+    deployment_id = run.deployment_id
+    run.cancel_requested_at = datetime.now(timezone.utc)
+    run.callback_secret_hash = None
+    run.status_message = None
+    if run.status is ExtractionRunStatus.QUEUED:
+        finish_run(run, ExtractionRunStatus.CANCELED, "Canceled by user")
+    else:
+        # Keep active_slot while the remote deployment is being terminated;
+        # otherwise another worker could overwrite its service variables.
+        run.status = ExtractionRunStatus.CANCELED
+        run.error_message = "Canceled by user"
+        run.finished_at = datetime.now(timezone.utc)
+    project_from_run(project, run)
     await db.commit()
 
-    return {"ok": True, "project_id": str(project_id)}
+    if deployment_id:
+        try:
+            await cancel_deployment_on_railway(deployment_id)
+            await clear_sandbox_variables_on_railway()
+        except RailwayError as exc:
+            logger.error("Railway cancellation failed for run %s: %s", run.id, exc)
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "the run was canceled locally but remote cleanup failed; "
+                    "the extraction queue remains locked for safety"
+                ),
+            ) from exc
+
+        async with get_session_factory()() as cleanup_db:
+            persisted = (
+                await cleanup_db.execute(
+                    select(ExtractionRun).where(ExtractionRun.id == run.id).with_for_update()
+                )
+            ).scalar_one()
+            persisted.active_slot = None
+            persisted.lease_owner = None
+            persisted.lease_expires_at = None
+            await cleanup_db.commit()
+    elif run.active_slot is not None:
+        # STARTING with no id is the uncertain trigger window. Releasing the
+        # slot could start a second deployment over the same mutable service.
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "the run was canceled locally but its deployment identity is unknown; "
+                "the extraction queue remains locked for manual reconciliation"
+            ),
+        )
+
+    return {"ok": True, "project_id": str(project_id), "run_id": str(run.id)}
 
 
 class SandboxStatusUpdate(BaseModel):
-    status: str  # CLONING | INDEXING | READY | FAILED
-    progress_percent: int | None = None
-    message: str | None = None
-    error: str | None = None
-    graph_json_url: str | None = None
+    status: Literal["CLONING", "INDEXING", "READY", "FAILED"]
+    progress_percent: int | None = Field(default=None, ge=0, le=100)
+    message: str | None = Field(default=None, max_length=512)
+    error: str | None = Field(default=None, max_length=4096)
 
 
-@router.post("/api/internal/projects/{project_id}/status")
-async def sandbox_status_callback(
+async def _authenticated_run(
+    db: AsyncSession,
     project_id: uuid.UUID,
-    payload: SandboxStatusUpdate,
-    x_sandbox_secret: str = Header(default=""),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Progress callback for the sandbox job.
-
-    Authenticated by a shared secret, not a user session — the caller is a
-    Railway container, not a browser. Without this check anyone could drive
-    any project to READY and point graph_json_url at a URL of their choosing,
-    which the workspace would then fetch and render.
-    """
-    settings = get_settings()
-    if not settings.sandbox_callback_secret:
-        raise HTTPException(status_code=503, detail="sandbox callbacks are not configured")
-
-    # compare_digest: a plain == leaks the secret one byte at a time to a
-    # caller who can measure response timing.
-    if not hmac.compare_digest(x_sandbox_secret, settings.sandbox_callback_secret):
-        raise HTTPException(status_code=401, detail="invalid sandbox secret")
-
-    try:
-        status = ProjectStatus(payload.status)
-    except ValueError:
-        raise HTTPException(status_code=400, detail=f"unknown status {payload.status!r}") from None
-
+    run_id: uuid.UUID,
+    secret: str,
+) -> tuple[Project, ExtractionRun]:
+    run = (
+        await db.execute(
+            select(ExtractionRun)
+            .where(ExtractionRun.id == run_id, ExtractionRun.project_id == project_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run not found")
+    if not callback_secret_matches(run, secret):
+        raise HTTPException(status_code=401, detail="invalid run callback secret")
     project = await db.get(Project, project_id)
     if project is None:
         raise HTTPException(status_code=404, detail="project not found")
+    if project.current_run_id != run.id:
+        raise HTTPException(status_code=409, detail="stale run callback rejected")
+    return project, run
 
-    # A canceled or already-finished project ignores late callbacks, so a job
-    # that keeps running after cancellation cannot resurrect it.
-    if project.status in _TERMINAL:
-        return {"ok": True, "ignored": "project already in a terminal state"}
 
-    project.status = status
+async def _claim_callback_event(
+    db: AsyncSession, run_id: uuid.UUID, event_id: uuid.UUID, event_type: str
+) -> bool:
+    statement = (
+        insert(ExtractionCallbackEvent)
+        .values(run_id=run_id, event_id=event_id, event_type=event_type)
+        .on_conflict_do_nothing(index_elements=["run_id", "event_id"])
+        .returning(ExtractionCallbackEvent.id)
+    )
+    return (await db.execute(statement)).scalar_one_or_none() is not None
+
+
+@router.post("/api/internal/projects/{project_id}/runs/{run_id}/status")
+async def sandbox_status_callback(
+    project_id: uuid.UUID,
+    run_id: uuid.UUID,
+    payload: SandboxStatusUpdate,
+    x_sandbox_secret: str = Header(default=""),
+    x_sandbox_event_id: uuid.UUID = Header(),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    project, run = await _authenticated_run(db, project_id, run_id, x_sandbox_secret)
+    if not await _claim_callback_event(db, run.id, x_sandbox_event_id, "status"):
+        return {"ok": True, "duplicate": True}
+
+    status = ExtractionRunStatus(payload.status)
+    if not transition_allowed(run.status, status):
+        raise HTTPException(
+            status_code=409,
+            detail=f"invalid run transition {run.status.value} -> {status.value}",
+        )
+
+    run.status = status
+    run.lease_expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=get_settings().run_worker_lease_seconds
+    )
     if payload.progress_percent is not None:
-        project.progress_percent = max(0, min(100, payload.progress_percent))
+        run.progress_percent = payload.progress_percent
     if payload.message is not None:
-        project.status_message = payload.message
+        run.status_message = payload.message
     if payload.error is not None:
-        project.error_message = payload.error
-    if payload.graph_json_url is not None:
-        project.graph_json_url = payload.graph_json_url
+        run.error_message = payload.error
 
-    if status is ProjectStatus.READY:
-        project.progress_percent = 100
-        project.finished_at = datetime.now(timezone.utc)
-    elif status is ProjectStatus.FAILED:
-        project.finished_at = datetime.now(timezone.utc)
+    if status is ExtractionRunStatus.READY:
+        try:
+            await clear_sandbox_variables_on_railway()
+        except RailwayError as exc:
+            logger.error("Railway variable cleanup failed for run %s: %s", run.id, exc)
+            raise HTTPException(status_code=502, detail="sandbox cleanup failed") from exc
+        run.progress_percent = 100
+        finish_run(run, status)
+    elif status is ExtractionRunStatus.FAILED:
+        try:
+            await clear_sandbox_variables_on_railway()
+        except RailwayError as exc:
+            logger.error("Railway variable cleanup failed for run %s: %s", run.id, exc)
+            raise HTTPException(status_code=502, detail="sandbox cleanup failed") from exc
+        finish_run(run, status, payload.error or "Sandbox failed")
 
+    project_from_run(project, run)
     await db.commit()
     return {"ok": True}
 
 
-@router.post("/api/internal/projects/{project_id}/artifacts")
+@router.post("/api/internal/projects/{project_id}/runs/{run_id}/artifacts")
 async def upload_artifacts(
     project_id: uuid.UUID,
+    run_id: uuid.UUID,
     graph: UploadFile = File(...),
     files: UploadFile | None = File(default=None),
     x_sandbox_secret: str = Header(default=""),
+    x_sandbox_event_id: uuid.UUID = Header(),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Receive graph.json (+ optional files.json) from a finished sandbox run.
@@ -331,20 +472,20 @@ async def upload_artifacts(
     land in one directory per project so routes/projects.py can keep reading
     files.json from alongside graph.json.
 
-    Authenticated by the same shared secret as the status callback, for the
-    same reason: without it, anyone could overwrite any project's graph.
+    Authenticated by a per-run secret. Artifacts land under the run id, so a
+    stale process cannot overwrite another attempt's files.
     """
     settings = get_settings()
-    if not settings.sandbox_callback_secret:
-        raise HTTPException(status_code=503, detail="sandbox callbacks are not configured")
-    if not hmac.compare_digest(x_sandbox_secret, settings.sandbox_callback_secret):
-        raise HTTPException(status_code=401, detail="invalid sandbox secret")
+    project, run = await _authenticated_run(db, project_id, run_id, x_sandbox_secret)
+    if run.status is not ExtractionRunStatus.INDEXING:
+        raise HTTPException(status_code=409, detail="run is not accepting artifacts")
+    if not await _claim_callback_event(db, run.id, x_sandbox_event_id, "artifacts"):
+        return {"ok": True, "duplicate": True, "graph_json_url": run.graph_json_url}
+    run.lease_expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=settings.run_worker_lease_seconds
+    )
 
-    project = await db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    target_dir = Path(settings.workspace_storage_dir).resolve() / str(project_id)
+    target_dir = Path(settings.workspace_storage_dir).resolve() / str(project_id) / str(run_id)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     async def _save(upload: UploadFile, name: str) -> Path:
@@ -370,25 +511,28 @@ async def upload_artifacts(
     if files is not None:
         await _save(files, "files.json")
 
-    project.graph_json_url = str(graph_path)
+    run.graph_json_url = str(graph_path)
+    project_from_run(project, run)
     await db.commit()
 
     return {"ok": True, "graph_json_url": str(graph_path)}
 
 
 class SandboxUsageReport(BaseModel):
-    provider: str
-    model: str
-    operation: str = "extraction"
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=255)
+    operation: Literal["extraction"] = "extraction"
+    prompt_tokens: int = Field(default=0, ge=0, le=100_000_000)
+    completion_tokens: int = Field(default=0, ge=0, le=100_000_000)
 
 
-@router.post("/api/internal/projects/{project_id}/usage")
+@router.post("/api/internal/projects/{project_id}/runs/{run_id}/usage")
 async def sandbox_usage_report(
     project_id: uuid.UUID,
+    run_id: uuid.UUID,
     payload: SandboxUsageReport,
     x_sandbox_secret: str = Header(default=""),
+    x_sandbox_event_id: uuid.UUID = Header(),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Record the tokens a sandbox job actually spent on community labeling.
@@ -403,26 +547,31 @@ async def sandbox_usage_report(
     Attributed to the project's owner so it rolls up into both the admin
     spend log and that user's own /api/usage view.
     """
-    settings = get_settings()
-    if not settings.sandbox_callback_secret:
-        raise HTTPException(status_code=503, detail="sandbox callbacks are not configured")
-    if not hmac.compare_digest(x_sandbox_secret, settings.sandbox_callback_secret):
-        raise HTTPException(status_code=401, detail="invalid sandbox secret")
-
-    project = await db.get(Project, project_id)
-    if project is None:
-        raise HTTPException(status_code=404, detail="project not found")
-
-    await record_usage(
-        db,
-        provider=payload.provider,
-        model=payload.model,
-        operation=payload.operation,
-        prompt_tokens=payload.prompt_tokens,
-        completion_tokens=payload.completion_tokens,
-        user_id=project.user_id,
-        project_id=project.id,
+    project, run = await _authenticated_run(db, project_id, run_id, x_sandbox_secret)
+    if run.status not in {ExtractionRunStatus.CLONING, ExtractionRunStatus.INDEXING}:
+        raise HTTPException(status_code=409, detail="run is not accepting usage events")
+    if not await _claim_callback_event(db, run.id, x_sandbox_event_id, "usage"):
+        return {"ok": True, "duplicate": True}
+    run.lease_expires_at = datetime.now(timezone.utc) + timedelta(
+        seconds=get_settings().run_worker_lease_seconds
     )
+
+    db.add(
+        UsageEvent(
+            provider=payload.provider,
+            model=payload.model,
+            operation=payload.operation,
+            prompt_tokens=payload.prompt_tokens,
+            completion_tokens=payload.completion_tokens,
+            user_id=project.user_id,
+            project_id=project.id,
+            run_id=run.id,
+            cost_estimate=estimate_cost(
+                payload.provider, payload.model, payload.prompt_tokens, payload.completion_tokens
+            ),
+        )
+    )
+    await db.commit()
     return {"ok": True}
 
 

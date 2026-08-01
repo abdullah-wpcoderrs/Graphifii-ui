@@ -477,6 +477,24 @@
   background: var(--bg-app);
 }
 
+.workspace-page-centered {
+  display: grid;
+  place-items: center;
+}
+
+.workspace-empty-note {
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.editor-tabs-empty {
+  padding: 0 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .workspace-header {
   display: grid;
   height: 44px;
@@ -1268,6 +1286,26 @@
   background: rgb(59 130 246 / 5%);
 }
 
+.agent-message-error {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-left: 2px solid #f87171;
+  background: rgb(248 113 113 / 8%);
+  color: #fca5a5;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.agent-streaming-file {
+  margin: 6px 0 0 !important;
+  color: #93c5fd !important;
+  font-size: 9px !important;
+}
+
+.agent-streaming-file code {
+  font-family: var(--font-code);
+}
+
 .agent-message.is-streaming i {
   display: inline-block;
   width: 3px;
@@ -1698,4 +1736,157 @@
     align-items: flex-start;
     flex-direction: column;
   }
+}
+
+/* Agent diff review dialog */
+
+.diff-dialog-panel {
+  max-width: 900px;
+  height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-dialog-subtitle {
+  margin: -10px 0 14px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.diff-dialog-body {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+}
+
+.diff-dialog-file-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+}
+
+.diff-dialog-file-list li {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.diff-dialog-file-list li:last-child {
+  border-bottom: none;
+}
+
+.diff-dialog-file-list li button:first-child {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 8px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-code);
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.diff-dialog-file-list li button:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.diff-dialog-file-list li button:first-child i {
+  color: var(--accent-emerald);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.diff-dialog-file-list li button.is-active {
+  background: var(--bg-editor);
+}
+
+.diff-dialog-dismiss {
+  padding: 0 10px;
+  align-self: stretch;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.diff-dialog-dismiss:hover {
+  color: #fca5a5;
+}
+
+.diff-dialog-editor {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.diff-dialog-editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diff-dialog-pr-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.diff-dialog-pr-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diff-dialog-pr-form input,
+.diff-dialog-pr-form textarea {
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.agent-budget-status {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.agent-budget-status.is-exceeded {
+  border-color: rgb(248 113 113 / 40%);
+  color: #fca5a5;
 }

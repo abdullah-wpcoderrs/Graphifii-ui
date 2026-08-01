@@ -79,7 +79,7 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
   const [canceling, setCanceling] = useState(false);
   const [attempt, setAttempt] = useState(0);
 
-  const startedAtRef = useRef(Date.now());
+  const [startedAt, setStartedAt] = useState(() => Date.now());
   const socketRef = useRef<WebSocket | null>(null);
   const retryTimerRef = useRef<number | null>(null);
   const backoffRef = useRef(1000);
@@ -122,6 +122,7 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
   useEffect(() => {
     const wsBase = getPublicWsUrl();
     if (!wsBase) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- config validation on mount, not a synchronous render-time update
       setFatalError("The backend API URL is not configured.");
       return;
     }
@@ -234,7 +235,7 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
       redirectedRef.current = false;
       lastStatusRef.current = null;
       lastMessageRef.current = null;
-      startedAtRef.current = Date.now();
+      setStartedAt(Date.now());
       // The WS connection closed after the prior terminal FAILED frame —
       // bump attempt to force the effect above to open a fresh socket.
       setAttempt((value) => value + 1);
@@ -247,7 +248,7 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
     }
   }
 
-  const elapsed = now - startedAtRef.current;
+  const elapsed = now - startedAt;
   const owner = project?.repo_name.split("/")[0] ?? null;
   const name = project?.repo_name.split("/").slice(1).join("/") ?? null;
 
@@ -428,7 +429,7 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
                 <article key={item.id}>
                   <span className={index === 0 ? "is-current" : ""} />
                   <div>
-                    <time>{formatElapsed(item.at - startedAtRef.current)}</time>
+                    <time>{formatElapsed(item.at - startedAt)}</time>
                     <p>{item.label}</p>
                   </div>
                 </article>

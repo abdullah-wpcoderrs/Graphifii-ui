@@ -20,6 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from graphify.server.db import get_db
 from graphify.server.models import Project, User
+from graphify.server.repo_api import (
+    RepoAuthError,
+    RepoError,
+    RepoNotFoundError,
+    RepoTooLargeError,
+    build_repo_client,
+)
+from graphify.server.routes.launch import _decrypt_repo_token
 from graphify.server.sessions import get_current_user
 
 router = APIRouter(prefix="/api", tags=["projects"])
@@ -32,6 +40,8 @@ def _serialize(project: Project) -> dict:
         "id": str(project.id),
         "repo_name": project.repo_name,
         "repo_url": project.repo_url,
+        "provider": project.provider,
+        "default_branch": project.default_branch,
         "status": project.status.value,
         "graph_json_url": project.graph_json_url,
         "graph_html_url": project.graph_html_url,
@@ -107,3 +117,57 @@ async def get_project_files(
         raise HTTPException(status_code=404, detail="file tree not yet generated")
     files_location = project.graph_json_url.rsplit("/", 1)[0] + "/files.json"
     return await _fetch_json_artifact(files_location)
+
+
+@router.get("/projects/{project_id}/files/{path:path}")
+async def get_project_file_content(
+    project_id: str,
+    path: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """One file's current content, read live from the git provider.
+
+    Serves the editor's file viewer and, indirectly, the agent: both need
+    real file bodies, which the extraction artifacts do not contain
+    (files.json carries the tree, not the contents).
+
+    Content comes from the provider rather than a stored copy so what the
+    user reads is the repository's current state, not a snapshot frozen at
+    extraction time.
+
+    Path handling is allowlist-based, not sanitization-based: the requested
+    path must appear verbatim in the project's own files.json. A traversal
+    attempt ("../../etc/passwd") fails because it is not in that list, so
+    correctness does not depend on catching every encoding of "..".
+    """
+    project = await _get_owned_project(project_id, user, db)
+    if not project.graph_json_url:
+        raise HTTPException(status_code=404, detail="file tree not yet generated")
+
+    files_location = project.graph_json_url.rsplit("/", 1)[0] + "/files.json"
+    tree = await _fetch_json_artifact(files_location)
+    known = {entry.get("path") for entry in tree.get("files", [])}
+    if path not in known:
+        raise HTTPException(status_code=404, detail="file not found in this project")
+
+    token = _decrypt_repo_token(user, project.provider)
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail=f"connect your {project.provider} account to read file contents",
+        )
+
+    client = build_repo_client(project.provider, token, project.repo_name)
+    try:
+        file = await client.get_file(path, project.default_branch)
+    except RepoTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc)) from exc
+    except RepoAuthError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except RepoNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RepoError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    return {"path": file.path, "content": file.content, "sha": file.sha, "size": file.size}

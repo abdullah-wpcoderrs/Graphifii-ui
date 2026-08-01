@@ -3,17 +3,16 @@
 The Graphify backend launches an **ephemeral Railway job** for each project:
 it clones the repository, runs `graphify extract /workspace`, writes
 `graph.json` + `files.json`, and reports progress back to the backend. This
-guide creates the Railway project and produces the five environment values
+guide creates the Railway project and produces the four environment values
 the backend needs.
 
-**Result of this guide** — five values for `graphify/.env`:
+**Result of this guide** — four values for `graphify/.env`:
 
 ```
 RAILWAY_API_TOKEN=
 RAILWAY_PROJECT_ID=
 RAILWAY_SERVICE_ID=
 RAILWAY_ENVIRONMENT_ID=
-SANDBOX_CALLBACK_SECRET=
 ```
 
 Until all of them are set, `POST /api/projects` returns **503** with a clear
@@ -89,7 +88,7 @@ Confirm all three IDs are real and mutually consistent, so a typo surfaces
 here rather than as an opaque Railway error during a launch:
 
 ```bash
-curl -s https://backboard.railway.app/graphql/v2 \
+curl -s https://backboard.railway.com/graphql/v2 \
   -H "Authorization: Bearer $RAILWAY_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"query":"query { me { projects { edges { node { id name environments { edges { node { id name } } } services { edges { node { id name } } } } } } } }"}' | python3 -m json.tool
@@ -98,35 +97,23 @@ curl -s https://backboard.railway.app/graphql/v2 \
 The response lists each project with its `id`, its environments, and its
 services. Match them against what you copied from the URLs.
 
-## Step 6 — Generate the callback secret
-
-The sandbox reports progress to
-`POST /api/internal/projects/{id}/status`. That endpoint is authenticated by
-a shared secret, compared with `hmac.compare_digest`:
-
-```bash
-openssl rand -hex 32
-```
-
-Put the result in `SANDBOX_CALLBACK_SECRET`. The backend passes it to each job
-as `GRAPHIFY_CALLBACK_SECRET`, and the job must send it back as the
-`X-Sandbox-Secret` header. **If this is unset the callback endpoint is
-disabled (503)** — deliberately, because an unauthenticated version would let
-anyone mark any project `READY` and point its `graph_json_url` at a URL of
-their choosing, which the workspace would then fetch and render.
-
-## Step 7 — Fill in `.env` and restart
+## Step 6 — Fill in `.env` and restart
 
 ```
 RAILWAY_API_TOKEN=<step 4>
 RAILWAY_PROJECT_ID=<step 2>
 RAILWAY_SERVICE_ID=<step 3a>
 RAILWAY_ENVIRONMENT_ID=<step 3b>
-SANDBOX_CALLBACK_SECRET=<step 6>
 ```
 
-Restart the backend. `POST /api/projects` should now attempt a real deploy
-instead of returning 503.
+Restart the backend. `POST /api/projects` now creates an immutable queued run.
+The database-backed dispatcher generates a random callback credential for
+that run, stores only its SHA-256 hash, and passes the plaintext credential
+directly to the one Railway deployment that needs it.
+
+For production, add Redis and run the dispatcher as a separate worker service.
+Follow [Redis extraction queue setup](redis-run-queue.md) after completing this
+guide. PostgreSQL remains the source of truth in both configurations.
 
 ---
 
@@ -154,14 +141,16 @@ entire extraction pipeline on your laptop with **no Railway and no tunnel**.
 This separates "is my container correct?" from "is my Railway wiring
 correct?" — debugging both at once is what makes this step feel impossible.
 
-Create a project row to report against, then:
+The supported end-to-end test is to start the backend and use
+`POST /api/projects`; that creates the required project/run rows and per-run
+credential. For container-only smoke testing, callbacks can be omitted and
+the sandbox will log progress locally:
 
 ```bash
 docker run --rm \
   -e REPO_URL="https://github.com/octocat/Hello-World.git" \
-  -e PROJECT_ID="<a real project uuid>" \
-  -e GRAPHIFY_CALLBACK_URL="http://host.docker.internal:8000/api/internal/projects/<uuid>/status" \
-  -e GRAPHIFY_CALLBACK_SECRET="<SANDBOX_CALLBACK_SECRET from .env>" \
+  -e PROJECT_ID="smoke-project" \
+  -e RUN_ID="smoke-run" \
   -e OPENAI_API_KEY="<optional — skips community labeling if absent>" \
   graphify-sandbox:latest
 ```
@@ -282,10 +271,12 @@ In the `graphify-extractor` service:
 | --- | --- |
 | `REPO_URL` | Repository to clone |
 | `PROJECT_ID` | Included in the progress callback URL |
+| `RUN_ID` | Immutable extraction attempt identity |
+| `REPO_BRANCH` | Branch to clone |
 | `REPO_TOKEN` | User's decrypted git token — only set for private repos |
 | `<PROVIDER>_API_KEY` | Admin-configured LLM key, e.g. `OPENAI_API_KEY` |
 | `GRAPHIFY_CALLBACK_URL` | Where to POST progress |
-| `GRAPHIFY_CALLBACK_SECRET` | Sent back as `X-Sandbox-Secret` |
+| `GRAPHIFY_CALLBACK_SECRET` | Random per-run credential, sent back as `X-Sandbox-Secret` |
 | `WORKSPACE_STORAGE_TYPE` | `local` or `s3` |
 
 The job is expected to POST progress as it goes:
@@ -293,6 +284,7 @@ The job is expected to POST progress as it goes:
 ```bash
 curl -X POST "$GRAPHIFY_CALLBACK_URL" \
   -H "X-Sandbox-Secret: $GRAPHIFY_CALLBACK_SECRET" \
+  -H "X-Sandbox-Event-Id: $(python -c 'import uuid; print(uuid.uuid4())')" \
   -H "Content-Type: application/json" \
   -d '{"status":"INDEXING","progress_percent":40,"message":"Parsing sources"}'
 ```
@@ -318,18 +310,16 @@ running after the user cancels cannot resurrect it.
   machine. For local development against a real Railway job, expose the
   backend with a tunnel (ngrok/cloudflared) and set `BACKEND_URL` to that
   public URL.
-- **The GraphQL mutation in `sandbox.py` is unverified against a live
-  account.** It was written from Railway's documented
-  `serviceInstanceDeploy` shape but has never been executed — Railway has no
-  plain "run a one-off job" REST endpoint, and the exact input shape is the
-  most likely thing to need adjusting on first real run. Expect to iterate
-  here; that is the first thing to check if a launch fails.
+- **The shared Railway service is serialized.** Redis Streams delivers work,
+  while the dispatcher uses the database's unique active slot and
+  `FOR UPDATE SKIP LOCKED`; queued runs do not replace variables until the
+  prior run is terminal.
 - **Secrets reach the job as environment variables.** The LLM key and the
   user's git token are visible to anything running inside that container.
   That is inherent to this design; it is safe only as long as the container
   runs Graphify's own image and nothing user-supplied.
-- **Sandbox teardown is not implemented.** Jobs are expected to exit on their
-  own; cancellation marks the project failed in the database but does not stop
-  the Railway job (Phase 7 scope).
+- **Cancellation is run-scoped.** The backend revokes the callback credential
+  and uses Railway's exact deployment id with `deploymentCancel`, falling back
+  to `deploymentStop` after the container is running.
 - **Cost scales with launches.** Every "Launch Workspace" is a container
   build+run. Watch the Railway usage dashboard once real users can trigger it.

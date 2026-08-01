@@ -1,22 +1,20 @@
 """Phase 3 — GitHub repository listing for the authenticated user.
 
-Token refresh rotation is Phase 5 scope (see
-frontend/docs/IMPLEMENTATION_PLAN.md "Follow-up phases"); an expired token
-here returns a plain 401 rather than attempting a refresh.
+Phase 5 added transparent refresh: an expired access token is silently
+rotated via the stored refresh token (token_refresh.py) before this route
+gives up and 401s.
 """
 
 from __future__ import annotations
-
-from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from graphify.server.crypto import decrypt
 from graphify.server.db import get_db
 from graphify.server.models import User
 from graphify.server.sessions import get_current_user
+from graphify.server.token_refresh import get_valid_access_token
 
 router = APIRouter(prefix="/api", tags=["github"])
 
@@ -28,16 +26,9 @@ _TIMEOUT = 10.0
 async def list_repositories(
     user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)
 ) -> list[dict]:
-    if not user.github_access_token_ciphertext or not user.github_access_token_iv:
-        raise HTTPException(status_code=401, detail="GitHub not connected")
-
-    if (
-        user.github_access_token_expires_at is not None
-        and user.github_access_token_expires_at <= datetime.now(timezone.utc)
-    ):
+    access_token = await get_valid_access_token(user, "github", db)
+    if access_token is None:
         raise HTTPException(status_code=401, detail="GitHub connection expired, please reconnect")
-
-    access_token = decrypt(user.github_access_token_ciphertext, user.github_access_token_iv)
 
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         try:

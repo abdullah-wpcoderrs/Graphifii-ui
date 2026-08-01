@@ -92,6 +92,7 @@ export function DashboardScreen() {
   }
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data load on mount, not a synchronous render-time update
     load();
   }, []);
 
