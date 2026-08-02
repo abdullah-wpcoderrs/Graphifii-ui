@@ -185,3 +185,19 @@ See [`frontend/README.md`](frontend/README.md) and
 [`frontend/ui-registry.md`](frontend/ui-registry.md) for UI conventions. The
 frontend is deployed separately from the backend and is outside the Railway
 platform-image consolidation.
+
+### Deploying to Vercel
+
+This is a monorepo — the repo root has no `package.json`. **Set the Vercel
+project's Root Directory to `frontend`** (Settings → General → Root
+Directory), or the build finds no Next.js app and every route 404s.
+
+Required environment variable on the Vercel project:
+
+```
+NEXT_PUBLIC_API_URL=https://graphify-api-production.up.railway.app
+```
+
+This must match the API service's actual Railway public domain
+(`BACKEND_URL` in the [Railway service configuration](#railway-service-configuration)
+section above) — the frontend calls this URL directly from the browser.
