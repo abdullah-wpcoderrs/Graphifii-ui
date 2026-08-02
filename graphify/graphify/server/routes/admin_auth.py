@@ -37,7 +37,7 @@ from graphify.server.admin_sessions import (
 from graphify.server.config import get_settings
 from graphify.server.db import get_db
 from graphify.server.models import Admin
-from graphify.server.sessions import is_secure_cookie
+from graphify.server.sessions import is_secure_cookie, session_cookie_samesite
 
 logger = logging.getLogger("graphify.server.admin_auth")
 
@@ -162,10 +162,11 @@ async def admin_login(
         secure=is_secure_cookie(),
         # See the matching comment on the GitHub session cookie in auth.py:
         # this endpoint is called via cross-site fetch() from the deployed
-        # frontend, so SameSite must be None (with Secure, already guaranteed
-        # by is_secure_cookie() in production) or the cookie is set but never
-        # sent back on the next admin API call.
-        samesite="none",
+        # frontend, so SameSite must be None there, or the cookie is set but
+        # never sent back on the next admin API call. session_cookie_samesite()
+        # falls back to "lax" whenever is_secure_cookie() is false (local HTTP
+        # dev), since SameSite=None without Secure is silently rejected.
+        samesite=session_cookie_samesite(),
         path="/",
     )
     return {"ok": True, "email": admin.email}
@@ -179,7 +180,7 @@ async def admin_logout(response: Response) -> dict:
         ADMIN_SESSION_COOKIE_NAME,
         httponly=True,
         secure=is_secure_cookie(),
-        samesite="none",
+        samesite=session_cookie_samesite(),
         path="/",
     )
     return {"ok": True}
