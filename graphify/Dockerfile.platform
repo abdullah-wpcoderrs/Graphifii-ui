@@ -1,0 +1,97 @@
+# The unified Graphify platform image — one build, four runtime roles.
+#
+# Replaces the pair of near-identical images this repo used to ship
+# (Dockerfile.worker, Dockerfile.sandbox). Those differed only in which extras
+# they installed and what they exec'd, which meant three separate builds could
+# drift apart and "which commit is production running?" had three answers.
+# Here there is one digest; SERVICE_ROLE decides what starts.
+#
+#   SERVICE_ROLE=api        public backend API
+#   SERVICE_ROLE=worker     private Redis/Postgres queue worker
+#   SERVICE_ROLE=extractor  the existing sandbox workload, unchanged
+#   SERVICE_ROLE=migrate    one-shot `alembic upgrade head`
+#
+# Build:
+#   docker build -f Dockerfile.platform -t graphify-platform:latest .
+#   # Railway runs linux/amd64; cross-build explicitly on Apple Silicon:
+#   docker build --platform linux/amd64 -f Dockerfile.platform -t graphify-platform:latest .
+#
+# Isolation is a *deployment* property, not an image property: these roles
+# never share a container, a filesystem, or a variable set. See
+# docs/unified-railway-platform-plan.md.
+#
+# No secret is ever baked in. Every input arrives as a runtime environment
+# variable, so one image serves every project and every environment.
+
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Explicit package inputs only — never `COPY . `. .dockerignore is a safety
+# net, not the control: if it ever regresses, a broad copy would silently bake
+# .env, credentials, and local workspaces into a published layer. Listing the
+# inputs means a mistake shows up as a build failure instead.
+COPY pyproject.toml README.md LICENSE LICENSE-MIT NOTICE /build/
+COPY graphify /build/graphify
+
+# This build pulls a lot of wheels, and on Apple Silicon it cross-builds for
+# linux/amd64, which makes each download slower and a transient PyPI read
+# timeout much more likely. pip's defaults (15s, 5 retries) fail the whole
+# build on one slow file; these give it room to recover.
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10
+
+# One combined dependency set covering all four roles:
+#   server                    FastAPI, SQLAlchemy/psycopg, Alembic, Redis, httpx
+#   openai/anthropic/gemini   provider SDKs the extractor's labeling step needs
+#   sql                       tree-sitter SQL grammar for repository extraction
+# Installing the union is what makes a single image viable. The cost is a
+# larger extractor image; the benefit is that a role can never be running
+# different library versions than the role that handed it work.
+RUN pip wheel --no-cache-dir --wheel-dir /wheels ".[server,openai,anthropic,gemini,sql]"
+
+
+FROM python:3.12-slim AS runtime
+
+# git: the extractor clones repositories with it (tree-sitter grammars ship as
+# wheels, so nothing else needs a compiler). ca-certificates: outbound TLS to
+# Neon, Redis, Railway's API, and the git remotes.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-index --find-links=/wheels \
+        "graphifyy[server,openai,anthropic,gemini,sql]" \
+    && rm -rf /wheels
+
+# The role dispatcher, plus the two things roles exec that are not console
+# scripts. alembic.ini/alembic/ ride along so migrations run from the exact
+# same artifact as the code they migrate for — no separate migration image to
+# keep in sync, no chance of applying a revision the running code never had.
+COPY scripts/platform_entrypoint.py /app/platform_entrypoint.py
+COPY scripts/sandbox_entrypoint.py /app/sandbox_entrypoint.py
+COPY alembic.ini /app/alembic.ini
+COPY alembic /app/alembic
+
+# The account every role actually runs as. The entrypoint starts as root only
+# to chown a Railway-mounted volume, then drops to this uid irreversibly
+# before exec — see scripts/platform_entrypoint.py.
+#
+# /workspace (extractor scratch) and /data/workspaces (API artifact mount)
+# are created here so their permissions are correct even when no volume is
+# attached.
+RUN useradd --create-home --uid 10001 graphify \
+    && mkdir -p /workspace /data/workspaces \
+    && chown -R graphify:graphify /workspace /data/workspaces /app
+
+# Unbuffered so Railway's log stream shows progress live rather than in one
+# burst at exit.
+ENV PYTHONUNBUFFERED=1 \
+    WORKSPACE_STORAGE_DIR=/data/workspaces
+
+# No default SERVICE_ROLE on purpose. An image that starts *something* when
+# misconfigured is how a worker accidentally becomes an API with database
+# credentials; this one refuses to start instead.
+ENTRYPOINT ["python", "/app/platform_entrypoint.py"]

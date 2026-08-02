@@ -118,3 +118,88 @@ def test_github_private_key_rejects_truncated_pem():
 def test_placeholder_values_are_rejected(field):
     with pytest.raises(ValidationError):
         _settings(**{field: "REPLACE_WITH_SOMETHING"})
+
+
+# --------------------------------------------------------------------------
+# PEM normalization across environment loaders
+# --------------------------------------------------------------------------
+#
+# The same .env line reaches the app in two different shapes depending on who
+# parsed it: python-dotenv strips quotes and unescapes \n, Docker's env_file
+# parser passes both through literally. Both must produce a usable key, or the
+# app runs from a checkout and fails only once containerized.
+
+
+def test_github_private_key_accepts_the_dotenv_shape():
+    settings = _settings(github_private_key="-----BEGIN KEY-----\nbody\n-----END KEY-----")
+    assert settings.github_private_key.startswith("-----BEGIN KEY-----\n")
+
+
+def test_github_private_key_accepts_docker_env_file_escaped_newlines():
+    # What a container actually receives from `env_file:` when .env holds a
+    # quoted, backslash-escaped key.
+    raw = '"-----BEGIN KEY-----\\nbody\\n-----END KEY-----"'
+
+    settings = _settings(github_private_key=raw)
+
+    assert "\n" in settings.github_private_key
+    assert not settings.github_private_key.startswith('"')
+    assert settings.github_private_key.endswith("-----END KEY-----")
+
+
+def test_github_private_key_leaves_a_real_multiline_value_untouched():
+    # Railway stores genuine multi-line values; normalization must not mangle
+    # a key that was already correct.
+    pem = "-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----"
+    assert _settings(github_private_key=pem).github_private_key == pem
+
+
+def test_github_private_key_still_rejects_a_truly_truncated_pem():
+    # Normalization must not turn the real failure mode into a silent pass.
+    with pytest.raises(ValidationError):
+        _settings(github_private_key='"-----BEGIN KEY----- no newline"')
+
+
+def test_quoted_values_from_docker_env_file_are_unquoted():
+    # `DATABASE_URL="postgresql+psycopg://..."` in .env: dotenv strips the
+    # quotes, Docker's env_file parser does not. Without normalization the
+    # container fails with "Could not parse SQLAlchemy URL", which points
+    # nowhere near the real cause.
+    settings = _settings(database_url='"postgresql+psycopg://u:p@h/db"')
+    assert settings.database_url == "postgresql+psycopg://u:p@h/db"
+
+
+def test_unquoted_values_are_left_exactly_as_they_are():
+    settings = _settings(database_url="postgresql+psycopg://u:p@h/db")
+    assert settings.database_url == "postgresql+psycopg://u:p@h/db"
+
+
+def test_quotes_inside_a_value_are_preserved():
+    # Only a matching leading/trailing pair is removed.
+    secret = 'a"b"c-and-more-padding-to-32-bytes-long'
+    assert _settings(session_secret=secret).session_secret == secret
+
+
+def test_bare_postgres_scheme_is_upgraded_to_psycopg3():
+    # Neon's console gives out `postgresql://`, which SQLAlchemy maps to
+    # psycopg2 — never installed here. A checkout may survive on a
+    # transitively present psycopg2; a container fails at engine creation.
+    settings = _settings(database_url="postgresql://u:p@h/db?sslmode=require")
+    assert settings.database_url.startswith("postgresql+psycopg://")
+
+
+def test_explicit_psycopg3_scheme_is_left_alone():
+    url = "postgresql+psycopg://u:p@h/db"
+    assert _settings(database_url=url).database_url == url
+
+
+def test_an_explicit_other_driver_is_not_silently_rewritten():
+    # Keep the error honest if someone genuinely selected another driver.
+    url = "postgresql+asyncpg://u:p@h/db"
+    assert _settings(database_url=url).database_url == url
+
+
+def test_quoted_bare_scheme_is_both_unquoted_and_upgraded():
+    # The combination that actually occurs in a Docker env_file.
+    settings = _settings(database_url='"postgresql://u:p@h/db"')
+    assert settings.database_url == "postgresql+psycopg://u:p@h/db"

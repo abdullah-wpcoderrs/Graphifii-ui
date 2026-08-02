@@ -1,0 +1,204 @@
+# Local Graphify platform — the same image and the same roles as Railway.
+#
+#   docker compose up --build
+#
+# What this gives you: the API, the queue worker, and Redis, wired together
+# exactly the way production wires them, from one build. What it deliberately
+# does NOT give you is a database.
+#
+# There is no PostgreSQL service here and there must never be one. Neon is the
+# only PostgreSQL provider Graphify uses, in every environment, and these
+# containers are database *clients* — they open an outbound TLS connection to
+# a Neon development branch using the DATABASE_URL in your gitignored
+# graphify/.env. Adding a local Postgres would mean local development runs
+# against a different engine, a different schema history, and different
+# pooling behaviour than production, which is exactly the class of bug this
+# setup exists to avoid. Create a Neon *development branch* instead: it is a
+# copy-on-write fork of production's schema and costs nothing to reset.
+#
+# Never point this at the production branch. See docs/railway-setup.md.
+#
+# Stop without losing data:      docker compose down
+# Stop AND erase local volumes:  docker compose down --volumes   (destructive)
+
+name: graphify
+
+# The image is built once and reused by every role — the whole point of the
+# consolidation. Only `api` carries the `build:` key; every other role
+# references the resulting tag, so `up --build` produces exactly one build and
+# every role is provably running the same bits.
+x-platform-image: &platform-image
+  image: graphify-platform:local
+
+# Secrets reach the API and worker as a file reference, never as values in
+# this file — nothing here is a secret, so this file stays committable.
+#
+# `format: raw` is load-bearing, not decoration. Compose interpolates `${...}`
+# inside env files by default, and graphify/.env legitimately contains Railway
+# reference syntax (`${{Redis.REDIS_URL}}`) copied from the dashboard. Without
+# `raw`, Compose rejects the whole file with "Invalid template" and nothing
+# starts. `raw` passes every value through byte for byte.
+#
+# Anything under a service's own `environment:` key still wins over this file,
+# which is how the role-specific overrides below take effect. Because Compose
+# cannot select individual keys from one env_file, the platform dispatcher
+# applies the final least-privilege boundary before exec: API/worker lose
+# DATABASE_URL_DIRECT, while Alembic receives only the direct URL and ordinary
+# process plumbing. Tests pin that child-environment contract.
+x-backend-env: &backend-env
+  env_file:
+    - path: ./graphify/.env
+      required: true
+      format: raw
+
+services:
+  # ------------------------------------------------------------------
+  # API — the only service with a published port and a persistent volume
+  # ------------------------------------------------------------------
+  api:
+    <<: [*platform-image, *backend-env]
+    # The one place the image is built. Context is ./graphify because that is
+    # where pyproject.toml and the package live; compose.yaml sits a level up
+    # so it can also cover the frontend later without moving.
+    build:
+      context: ./graphify
+      dockerfile: Dockerfile.platform
+    environment:
+      SERVICE_ROLE: api
+      # The embedded worker must stay off: the `worker` service below is the
+      # dispatcher. Two of them racing is survivable — Postgres row locks and
+      # the active_slot constraint are the real fence — but it makes local
+      # behaviour differ from production for no benefit.
+      RUN_WORKER_ENABLED: "false"
+      WORKSPACE_STORAGE_TYPE: local
+      WORKSPACE_STORAGE_DIR: /data/workspaces
+      # Docker's service name, not localhost — each container has its own
+      # loopback. Compose's DNS resolves `redis` on the shared network. This
+      # overrides whatever REDIS_URL graphify/.env holds, which on a machine
+      # configured for Railway is a reference template, not a URL.
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - workspace-artifacts:/data/workspaces
+    depends_on:
+      redis:
+        condition: service_healthy
+    # `unless-stopped`, not `no`: a Neon development branch suspends when idle
+    # and takes a few seconds to wake, so the first connection after a cold
+    # start can fail. Restarting is the retry — `depends_on` can only wait for
+    # services Compose itself runs, and Neon is not one of them.
+    restart: unless-stopped
+    healthcheck:
+      # This is the Neon readiness check as much as the API one: /health only
+      # answers once settings validated and the app started, which requires a
+      # resolvable Neon hostname and a working outbound TLS connection.
+      # urllib rather than curl — the slim base image has no curl, and adding
+      # one for a healthcheck would put it in the production image too.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=5).status==200 else 1)
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      # Generous: waking a suspended Neon branch plus app startup can exceed a
+      # shorter period, and a false "unhealthy" here is pure noise.
+      start_period: 60s
+
+  # ------------------------------------------------------------------
+  # Worker — private, stateless, no port, no volume
+  # ------------------------------------------------------------------
+  worker:
+    <<: [*platform-image, *backend-env]
+    environment:
+      SERVICE_ROLE: worker
+      REDIS_URL: redis://redis:6379/0
+    # No `ports:` and no `volumes:` — deliberate, and the same shape as the
+    # Railway worker service. Everything the worker needs to survive a restart
+    # lives in Neon; anything it wrote to a local disk would be a bug.
+    depends_on:
+      redis:
+        condition: service_healthy
+      api:
+        # Not service_healthy: the worker can run before the API serves, and
+        # coupling them means an API problem stops the queue draining too.
+        condition: service_started
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # Redis — queue delivery only, never a source of truth
+  # ------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    command:
+      # appendonly mirrors Railway's managed Redis persistence, so a local
+      # restart behaves the way production would. Either way Redis is only a
+      # delivery signal: the Postgres fallback scan recovers anything lost.
+      - redis-server
+      - --appendonly
+      - "yes"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    # No published port by default. Uncomment to poke at it with redis-cli
+    # from the host; leaving it closed keeps an unauthenticated Redis off
+    # whatever network your laptop happens to be on.
+    # ports:
+    #   - "6379:6379"
+
+  # ------------------------------------------------------------------
+  # Optional roles — not started by a plain `up`
+  # ------------------------------------------------------------------
+
+  # Applies Alembic migrations to your Neon development branch, then exits:
+  #   docker compose --profile migrate run --rm migrate
+  #
+  # Uses the DIRECT Neon URL, not the pooled one: Alembic's DDL and advisory
+  # locks do not behave correctly through PgBouncer's transaction pooling.
+  # The platform entrypoint promotes DATABASE_URL_DIRECT to DATABASE_URL for
+  # this process alone and drops all unrelated backend secrets, so set
+  # DATABASE_URL_DIRECT in graphify/.env.
+  migrate:
+    <<: [*platform-image, *backend-env]
+    environment:
+      SERVICE_ROLE: migrate
+    profiles: ["migrate"]
+    restart: "no"
+
+  # One-off smoke extraction, mirroring what the worker launches on Railway:
+  #   docker compose --profile extractor run --rm \
+  #     -e REPO_URL=https://github.com/pypa/sampleproject.git \
+  #     -e PROJECT_ID=<uuid> -e RUN_ID=<uuid> \
+  #     -e GRAPHIFY_CALLBACK_URL=http://api:8000/api/internal/projects/<uuid>/runs/<uuid>/status \
+  #     -e GRAPHIFY_CALLBACK_SECRET=<secret> \
+  #     extractor
+  #
+  # Note what is absent: no env_file, so no DATABASE_URL, no SESSION_SECRET,
+  # no RAILWAY_API_TOKEN. The extractor runs code paths driven by an untrusted
+  # repository and reports results through an authenticated callback, so it
+  # needs no database connection at all. Do not attach the backend env here
+  # "for convenience" — this profile is also how that boundary gets verified
+  # locally, and tests/server/test_compose_environment.py asserts it.
+  extractor:
+    <<: *platform-image
+    profiles: ["extractor"]
+    environment:
+      SERVICE_ROLE: extractor
+      WORKSPACE_STORAGE_TYPE: local
+    # A batch job: a successful exit is success, not a crash to restart.
+    restart: "no"
+
+volumes:
+  # Survives `docker compose down`. Removed only by `down --volumes`.
+  redis-data:
+  # Mounted into the API alone. The worker is stateless and the extractor's
+  # /workspace is ephemeral by design.
+  workspace-artifacts:

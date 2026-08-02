@@ -94,12 +94,14 @@ export function fetchProjectFileContent(id: string, path: string) {
   );
 }
 
-export function launchProject(input: {
+export type LaunchProjectInput = {
   repoFullName: string;
   repoUrl: string;
   provider: IntegrationProvider;
   defaultBranch: string;
-}) {
+};
+
+export function launchProject(input: LaunchProjectInput) {
   return apiPost<LaunchProgress>("/api/projects", {
     repo_full_name: input.repoFullName,
     repo_url: input.repoUrl,

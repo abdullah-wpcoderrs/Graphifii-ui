@@ -5,6 +5,10 @@ export type DashboardProject = {
   id: string;
   owner: string;
   name: string;
+  repoFullName: string;
+  repoUrl: string;
+  provider: Project["provider"];
+  defaultBranch: string;
   status: ProjectStatus;
   updatedLabel: string;
 };
@@ -39,6 +43,10 @@ export function mapProject(project: Project): DashboardProject {
     id: project.id,
     owner: owner ?? "",
     name: nameParts.join("/") || project.repo_name,
+    repoFullName: project.repo_name,
+    repoUrl: project.repo_url,
+    provider: project.provider,
+    defaultBranch: project.default_branch,
     status: project.status,
     updatedLabel: formatRelativeTime(project.updated_at) ?? "Unknown",
   };

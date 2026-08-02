@@ -6,6 +6,7 @@ import { fetchProjects } from "../lib/api";
 import { mapProject, statusLabel, statusTone, type DashboardProject } from "../lib/dashboard";
 import { ApiError } from "../lib/api-errors";
 import { EmptyState } from "./empty-state";
+import { RerunProjectButton } from "./rerun-project-button";
 import { ErrorState, Spinner } from "./ui";
 
 type ScreenView = "loading" | "empty" | "error" | "list";
@@ -13,9 +14,20 @@ type ScreenView = "loading" | "empty" | "error" | "list";
 function ProjectAction({ project }: { project: DashboardProject }) {
   if (project.status === "READY") {
     return (
-      <Link className="repository-action" href={`/workspace/${project.id}`}>
-        Resume Workspace
-      </Link>
+      <div className="repository-action-cluster">
+        <Link className="repository-action" href={`/workspace/${project.id}`}>
+          Resume Workspace
+        </Link>
+        <RerunProjectButton
+          className="repository-action is-rerun"
+          project={{
+            repoFullName: project.repoFullName,
+            repoUrl: project.repoUrl,
+            provider: project.provider,
+            defaultBranch: project.defaultBranch,
+          }}
+        />
+      </div>
     );
   }
 

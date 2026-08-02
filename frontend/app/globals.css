@@ -1194,6 +1194,16 @@ button {
   color: #fca5a5;
 }
 
+.repository-action.is-rerun {
+  border-color: rgb(59 130 246 / 35%);
+  color: #93c5fd;
+}
+
+.repository-action.is-rerun:hover {
+  border-color: rgb(59 130 246 / 62%);
+  background: rgb(59 130 246 / 8%);
+}
+
 .repository-action.is-disabled {
   border-color: var(--border-subtle);
   color: var(--text-muted);
@@ -1210,6 +1220,20 @@ button.repository-action:disabled {
 }
 
 .repository-action-group {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
+.repository-action-cluster {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.rerun-project-action {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
@@ -1460,6 +1484,16 @@ button.repository-action:disabled {
   .repository-action {
     width: 100%;
     max-width: 160px;
+  }
+
+  .repository-action-cluster {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .rerun-project-action {
+    align-items: stretch;
   }
 }
 

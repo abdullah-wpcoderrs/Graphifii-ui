@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -8,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 # Import models so they register on Base.metadata before autogenerate runs.
-from graphify.server.config import get_settings
+from graphify.server.config import get_settings, normalize_database_url
 from graphify.server.db import Base
 from graphify.server import models  # noqa: F401
 
@@ -25,7 +26,22 @@ target_metadata = Base.metadata
 
 # DATABASE_URL comes from graphify/.env via get_settings(), not alembic.ini —
 # keeps the connection string in one place.
-config.set_main_option("sqlalchemy.url", get_settings().database_url)
+#
+# The bare environment variable wins when it is present. SERVICE_ROLE=migrate
+# in the unified platform image promotes Neon's *direct* URL into DATABASE_URL
+# for the migration process only (Alembic's DDL and advisory locks must not go
+# through the pooled endpoint). That job also has none of the GitHub App or
+# session secrets Settings requires, so calling get_settings() there would
+# fail validation on fields a migration has no use for.
+#
+# Normalized through the same helper Settings uses: this path never builds a
+# Settings object, so without it a quoted value or Neon's bare `postgresql://`
+# scheme reaches SQLAlchemy unfixed and fails on a missing psycopg2.
+_url = os.environ.get("DATABASE_URL")
+config.set_main_option(
+    "sqlalchemy.url",
+    normalize_database_url(_url) if _url else get_settings().database_url,
+)
 
 
 def run_migrations_offline() -> None:
