@@ -71,11 +71,25 @@ def _sweep_stale_pytest_rows():
 async def app_client(_sweep_stale_pytest_rows):
     """An httpx client talking directly to the real FastAPI app in-process —
     no real network socket, but the full real routing/dependency/middleware
-    stack, same as a browser would exercise."""
+    stack, same as a browser would exercise.
+
+    Sends a default Origin header matching the configured frontend_url, the
+    same way a real browser's fetch() would on every request. Without this,
+    every state-changing test (POST/PUT/PATCH/DELETE with a real session
+    cookie) would be rejected by CSRFOriginMiddleware — the middleware exists
+    precisely to reject an unsafe request whose Origin doesn't match, and an
+    httpx client sends no Origin at all unless told to. A test that wants to
+    exercise the *rejection* path should override this header per-request.
+    """
     from graphify.server.app import app
+    from graphify.server.config import get_settings
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers={"origin": get_settings().frontend_url},
+    ) as client:
         yield client
 
 
