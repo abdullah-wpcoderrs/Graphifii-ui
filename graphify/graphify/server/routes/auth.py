@@ -43,6 +43,7 @@ from graphify.server.sessions import (
     generate_oauth_state,
     get_current_user,
     is_secure_cookie,
+    session_cookie_samesite,
 )
 
 logger = logging.getLogger("graphify.server.auth")
@@ -188,7 +189,16 @@ async def github_callback(
         max_age=SESSION_MAX_AGE,
         httponly=True,
         secure=is_secure_cookie(),
-        samesite="lax",
+        # The frontend (Vercel) and this API (Railway) are different sites in
+        # production, so the session cookie must be readable on the frontend's
+        # cross-site fetch() calls (e.g. GET /api/session). SameSite=Lax only
+        # sends a cookie on top-level navigation — it would ride along on this
+        # very redirect but then be silently withheld from every subsequent
+        # XHR/fetch, making the frontend think the user was never logged in.
+        # session_cookie_samesite() only returns "none" when is_secure_cookie()
+        # is also true, since SameSite=None without Secure is silently rejected
+        # by browsers (breaking dev, where BACKEND_URL is http://localhost).
+        samesite=session_cookie_samesite(),
         path="/",
     )
     return response

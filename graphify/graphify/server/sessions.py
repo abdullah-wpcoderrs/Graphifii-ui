@@ -60,6 +60,20 @@ def is_secure_cookie() -> bool:
     return get_settings().backend_url.startswith("https://")
 
 
+def session_cookie_samesite() -> str:
+    """SameSite=None requires Secure, which local HTTP development lacks.
+
+    Production needs `None` because the frontend (Vercel) and this API
+    (Railway) are different sites, so a cross-site `fetch()` session check
+    needs the cookie to ride along. Development runs both over
+    `http://localhost`, where `is_secure_cookie()` is False and a browser
+    would silently reject a `SameSite=None` cookie for lacking `Secure` —
+    breaking login there instead. `Lax` is correct and sufficient locally
+    since frontend and backend are same-site on localhost.
+    """
+    return "none" if is_secure_cookie() else "lax"
+
+
 async def get_current_user(
     request: Request, db: AsyncSession = Depends(get_db)
 ) -> User:

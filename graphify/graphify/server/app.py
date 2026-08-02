@@ -20,7 +20,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from graphify.server.admin_sessions import ADMIN_SESSION_COOKIE_NAME
 from graphify.server.config import get_settings
+from graphify.server.csrf import CSRFOriginMiddleware
 from graphify.server.routes.agent import router as agent_router
 from graphify.server.routes.admin import router as admin_router
 from graphify.server.routes.admin_auth import router as admin_auth_router
@@ -31,6 +33,7 @@ from graphify.server.routes.integrations import router as integrations_router
 from graphify.server.routes.launch import router as launch_router
 from graphify.server.routes.projects import router as projects_router
 from graphify.server.routes.usage import router as usage_router
+from graphify.server.sessions import SESSION_COOKIE_NAME
 
 settings = get_settings()
 logger = logging.getLogger("graphify.server.app")
@@ -86,6 +89,16 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# CORS does not prevent CSRF — it restricts which origins can *read* a
+# response, not which origins can *send* a request. Cookie-only auth with
+# SameSite=None (required in production, see sessions.session_cookie_samesite)
+# needs an explicit Origin check on state-changing requests to compensate.
+app.add_middleware(
+    CSRFOriginMiddleware,
+    frontend_url=settings.frontend_url,
+    cookie_names=frozenset({SESSION_COOKIE_NAME, ADMIN_SESSION_COOKIE_NAME}),
 )
 
 app.include_router(auth_router)
