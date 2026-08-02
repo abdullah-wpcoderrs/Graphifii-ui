@@ -625,18 +625,22 @@ async def project_progress_ws(websocket: WebSocket, project_id: uuid.UUID) -> No
     if project is None:
         return
 
-    # Send current state immediately: a client reconnecting mid-extraction
-    # gets the truth on frame one instead of waiting for the next change.
-    last_payload = _serialize_progress(project)
-    await websocket.send_json(last_payload)
-    if project.status in _TERMINAL:
-        await websocket.close()
-        return
-
-    session_factory = get_session_factory()
-    elapsed = 0.0
-
     try:
+        # Send current state immediately: a client reconnecting mid-extraction
+        # gets the truth on frame one instead of waiting for the next change.
+        # Keep this inside the disconnect guard too. A browser can replace its
+        # first socket during hydration after the handshake succeeds but before
+        # this initial frame is written; that is a normal client disconnect,
+        # not an application error worth an ASGI traceback.
+        last_payload = _serialize_progress(project)
+        await websocket.send_json(last_payload)
+        if project.status in _TERMINAL:
+            await websocket.close()
+            return
+
+        session_factory = get_session_factory()
+        elapsed = 0.0
+
         while elapsed < _MAX_STREAM_SECONDS:
             await asyncio.sleep(_POLL_INTERVAL_SECONDS)
             elapsed += _POLL_INTERVAL_SECONDS

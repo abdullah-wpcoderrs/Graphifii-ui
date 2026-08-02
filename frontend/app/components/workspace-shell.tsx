@@ -44,6 +44,7 @@ import {
   type WorkspaceGraphNode,
 } from "../lib/graph";
 import { AgentDiffDialog } from "./agent-diff-dialog";
+import { RerunProjectButton } from "./rerun-project-button";
 import { ErrorState, Spinner } from "./ui";
 
 const MAX_WS_BACKOFF_MS = 15000;
@@ -486,8 +487,8 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
     () => ({
       automaticLayout: true,
       fontFamily: "'Geist Mono', 'JetBrains Mono', monospace",
-      fontSize: 13,
-      lineHeight: 21,
+      fontSize: 15,
+      lineHeight: 23,
       minimap: { enabled: false },
       padding: { top: 14 },
       readOnly: true,
@@ -634,6 +635,16 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
         <div className="workspace-header-actions">
           <span>{state.totalFiles} files</span>
           {state.filesTruncated && <span title="Only part of the tree loaded">Truncated</span>}
+          <RerunProjectButton
+            className="workspace-rerun-button"
+            label="Rerun"
+            project={{
+              repoFullName: state.project.repo_name,
+              repoUrl: state.project.repo_url,
+              provider: state.project.provider,
+              defaultBranch: state.project.default_branch,
+            }}
+          />
         </div>
       </header>
 

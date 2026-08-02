@@ -16,6 +16,44 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def normalize_database_url(value: str) -> str:
+    """Make a pasted PostgreSQL URL usable by this codebase.
+
+    Two corrections, both for mistakes that only surface after deployment:
+
+    1. Strip a matching pair of surrounding quotes. `DATABASE_URL="..."` is
+       valid .env syntax; python-dotenv unquotes it, Docker's `env_file`
+       parser does not.
+    2. Rewrite the bare `postgresql://` scheme to `postgresql+psycopg://`.
+       Neon's console emits the bare form, which SQLAlchemy maps to psycopg2 —
+       a driver this project neither depends on nor installs.
+
+    Shared by Settings and alembic/env.py: the migration role reads
+    DATABASE_URL straight from the environment without constructing Settings,
+    so normalizing in only one of them leaves the other broken.
+    """
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1]
+    if text.startswith("postgresql://"):
+        text = text.replace("postgresql://", "postgresql+psycopg://", 1)
+    return text
+
+
+def resolve_migration_database_url(raw_env_value: str | None) -> str:
+    """Pick the migration URL from the environment, falling back to Settings.
+
+    Used by ``alembic/env.py``. The bare `DATABASE_URL` environment variable
+    takes precedence when present (`SERVICE_ROLE=migrate` promotes Neon's
+    *direct* URL into it, and that process has none of the GitHub App or
+    session secrets a full `Settings` object requires). A whitespace-only
+    value must fall back to `Settings.database_url` rather than normalizing
+    to an empty string, which would hand Alembic an invalid `sqlalchemy.url`.
+    """
+    stripped = (raw_env_value or "").strip()
+    return normalize_database_url(stripped) if stripped else get_settings().database_url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT / ".env",
@@ -124,6 +162,85 @@ class Settings(BaseSettings):
                 f"fill in graphify/.env (see docs/github-app-setup.md)"
             )
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strip_env_quoting(cls, data):
+        """Remove shell quoting the environment loader left behind.
+
+        `DATABASE_URL="postgresql+psycopg://..."` in .env is valid and common.
+        python-dotenv strips those quotes, so running from a checkout works.
+        Docker's `env_file` parser does not, so the container receives a value
+        that literally begins with a double quote — and SQLAlchemy then fails
+        with "Could not parse SQLAlchemy URL", which points nowhere near the
+        actual cause.
+
+        Stripping here makes one .env behave identically under uvicorn,
+        Compose, and Railway, instead of requiring a differently formatted
+        copy per loader. Only a *matching* leading and trailing quote is
+        removed; quotes inside a value are left alone, and a secret cannot
+        begin and end with a quote character by accident (base64, hex, and URL
+        alphabets contain none).
+        """
+        if not isinstance(data, dict):
+            return data
+        cleaned = {}
+        for key, value in data.items():
+            if isinstance(value, str) and len(value) >= 2:
+                stripped = value.strip()
+                if stripped[0] == stripped[-1] and stripped[0] in "\"'":
+                    value = stripped[1:-1]
+            cleaned[key] = value
+        return cleaned
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def _require_psycopg3_driver(cls, value):
+        """Force SQLAlchemy onto psycopg3 regardless of how the URL was pasted.
+
+        Neon's console hands out `postgresql://...`, and SQLAlchemy maps that
+        bare scheme to psycopg2 — a driver this project does not depend on and
+        does not install (pyproject pins psycopg[binary], i.e. psycopg3). A
+        checkout can still limp along if psycopg2 happens to be present in the
+        virtualenv transitively; the container cannot, so the mistake shows up
+        only after deployment as `ModuleNotFoundError: No module named
+        'psycopg2'` from deep inside engine creation.
+
+        Rewriting the scheme here is safe: `postgresql+psycopg://` is the only
+        combination this codebase supports. An explicit non-psycopg driver is
+        left alone so the error stays honest if someone genuinely wants one.
+        """
+        return normalize_database_url(value) if isinstance(value, str) else value
+
+    @field_validator("github_private_key", mode="before")
+    @classmethod
+    def _normalize_pem(cls, value):
+        """Accept the PEM in whichever shape the environment loader produced.
+
+        The same .env file yields two different strings depending on who read
+        it, and both have to work:
+
+        - python-dotenv (used when the app runs from a checkout) understands
+          shell quoting: it strips the surrounding quotes and turns the
+          two-character sequence \\n into a real newline.
+        - Docker's `env_file` parser does neither. The container receives the
+          literal quotes and the literal backslash-n, which then fails PEM
+          validation below with a message pointing at a problem that isn't
+          there.
+
+        Normalizing here rather than asking every deployment to store the key
+        differently keeps one .env working for `uvicorn`, Compose, and Railway
+        alike. Railway's own multi-line variables arrive already correct and
+        pass through this untouched.
+        """
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+            text = text[1:-1]
+        if "\\n" in text and "\n" not in text:
+            text = text.replace("\\n", "\n")
+        return text
 
     @field_validator("github_private_key")
     @classmethod

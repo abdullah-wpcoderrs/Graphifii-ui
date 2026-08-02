@@ -2,8 +2,9 @@
 
 This file is for whoever (human or Claude) needs to restart the server,
 rebuild the sandbox image, or run the test suite without re-deriving how any
-of it works. It reflects the Phase 4 backend build (isolated admin auth,
-Railway sandbox provisioning, AI usage tracking), completed 2026-08-01.
+of it works. It reflects the Phase 5 backend build (unified Docker image for
+API/worker/extractor, local Compose environment, environment normalization
+for container-sourced secrets), completed 2026-08-02.
 
 ## Starting / restarting the backend server
 
@@ -108,9 +109,8 @@ uv run alembic upgrade head  # apply pending migrations
 uv run alembic check         # confirm no drift between models.py and migrations
 ```
 
-Current head as of this session: `d4e8b2317ac6` (adds `usage_events` +
-`projects` progress columns + `users.is_active`), on top of `c7f2a91be4d3`
-(adds the `admin` table).
+Current head: `f83a49b127d1` (adds immutable extraction runs, callback replay
+ledger, and run state transitions). See `alembic/versions/` for the full chain.
 
 ## Building and deploying the sandbox image
 
@@ -261,6 +261,52 @@ a reasonable middle ground:
 ```bash
 uv run pytest tests/ --collect-only -q
 ```
+
+## Local Docker Compose environment
+
+Since Phase 5, there is a `compose.yaml` at the repository root that brings up
+the entire stack (API + worker + Redis) from one unified Docker image, connected
+to your own Neon development branch:
+
+```bash
+# Start the API and worker (and Redis) — no database container
+docker compose up -d
+
+# Run migrations on your Neon development branch
+docker compose --profile migrate run --rm migrate
+
+# Extract from a public repository as a smoke test (--profile extractor)
+docker compose --profile extractor run --rm \
+  -e REPO_URL=https://github.com/pypa/sampleproject.git \
+  -e PROJECT_ID=<uuid> \
+  -e RUN_ID=<uuid> \
+  -e GRAPHIFY_CALLBACK_URL=http://api:8000/api/internal/projects/<uuid>/runs/<uuid>/status \
+  -e GRAPHIFY_CALLBACK_SECRET=test-secret \
+  extractor
+
+# Stop everything (data persists in named volumes)
+docker compose down
+
+# Erase everything including data
+docker compose down --volumes
+```
+
+**Before the first run**: set `DATABASE_URL` and `DATABASE_URL_DIRECT` in
+`graphify/.env` to your Neon development branch endpoints (see `.env.example`).
+
+**Key properties preserved from Railway** — the local stack is not a simplified
+mockup:
+- One image, four roles (`api`, `worker`, `extractor`, `migrate`).
+- The extractor role receives **no database credentials** — it runs code from
+  an untrusted repository.
+- Redis runs with `--appendonly yes` to mirror production persistence.
+- The API mounts a persistent volume (`workspace-artifacts`) and owns it.
+- The worker is stateless.
+- Neon remains the only database provider (no local Postgres container).
+- API startup retries a real Neon `SELECT 1`; `/health` returns 503 whenever
+  that round trip fails.
+- Production `graphify-server` runs without uvicorn's development reloader so
+  the server remains PID 1 and receives container signals directly.
 
 ## Architecture decisions (read before changing auth or the sandbox flow)
 

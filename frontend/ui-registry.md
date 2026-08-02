@@ -95,8 +95,8 @@ keeps identity, installation, and repository access visibly distinct.
 
 ### Repository dashboard list
 
-File: `app/components/dashboard-screen.tsx`
-Last updated: 2026-07-31
+Files: `app/components/dashboard-screen.tsx`, `app/components/repositories-screen.tsx`, `app/components/rerun-project-button.tsx`
+Last updated: 2026-08-02
 
 | Property | Class / token |
 | --- | --- |
@@ -116,8 +116,10 @@ Repository collections use a dense three-column row at desktop. Between
 `861px` and `1100px`, state and action controls stack inside a contained
 tablet-width column; below `860px`, rows become cards. Repository identity
 remains the first visual anchor, technical state uses compact mono badges, and
-every row exposes exactly one launch, resume, retry, or disabled provisioning
-action.
+new and in-progress rows expose one launch/progress action. Ready rows pair
+the primary workspace-resume path with a blue secondary rerun action. Rerun
+reuses the project, starts a fresh extraction run, and redirects to the shared
+provisioning screen; inline errors stay attached to the action that failed.
 
 ### Dashboard filter toolbar
 
@@ -168,7 +170,7 @@ failure language never claims that partial artifacts were persisted.
 ### Three-pane workspace shell
 
 File: `app/components/workspace-shell.tsx`
-Last updated: 2026-07-31
+Last updated: 2026-08-02
 
 | Property | Class / token |
 | --- | --- |
@@ -186,12 +188,14 @@ Last updated: 2026-07-31
 
 Desktop workspaces preserve Editor/Graph/Agent simultaneously with persisted
 resizable bounds. At `1100px` and below, the same state is exposed through
-one active panel at a time; repository and branch identity remain fixed.
+one active panel at a time; repository and branch identity remain fixed. A
+compact blue rerun action remains available in the workspace header and uses
+the same provisioning transition as repository/dashboard reruns.
 
 ### Workspace file explorer
 
 File: `app/components/workspace-shell.tsx`
-Last updated: 2026-07-31
+Last updated: 2026-08-02
 
 | Property | Class / token |
 | --- | --- |
@@ -210,7 +214,9 @@ Last updated: 2026-07-31
 Explorer trees use native `details`/`summary` disclosure, a real icon-library
 glyph for every visible icon, and language-aware file mappings with a neutral
 fallback. File identity remains consistent in explorer rows, editor tabs, and
-proposed-change lists.
+proposed-change lists. Explorer, editor chrome/code, and right-hand agent/output
+typography use the workspace readability scale, raised uniformly by `2px` from
+the original dense scale.
 
 ### Architecture graph node
 
@@ -236,7 +242,7 @@ path, community, and centrality remain distinct without relying on color alone.
 ### Graph-aware agent composer
 
 File: `app/components/workspace-shell.tsx`
-Last updated: 2026-07-31
+Last updated: 2026-08-02
 
 | Property | Class / token |
 | --- | --- |

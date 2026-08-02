@@ -56,17 +56,6 @@ function formatElapsed(ms: number) {
     .padStart(2, "0")}`;
 }
 
-function providerFromRepoUrl(url: string): "github" | "gitlab" | "gitbucket" {
-  try {
-    const host = new URL(url).hostname;
-    if (host.includes("gitlab")) return "gitlab";
-    if (host.includes("github")) return "github";
-    return "gitbucket";
-  } catch {
-    return "github";
-  }
-}
-
 export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
   const router = useRouter();
   const [project, setProject] = useState<Project | null>(null);
@@ -227,8 +216,8 @@ export function ProvisioningScreen({ projectId }: ProvisioningScreenProps) {
       await launchProject({
         repoFullName: project.repo_name,
         repoUrl: project.repo_url,
-        provider: providerFromRepoUrl(project.repo_url),
-        defaultBranch: "main",
+        provider: project.provider,
+        defaultBranch: project.default_branch,
       });
       setEvents([]);
       backoffRef.current = 1000;

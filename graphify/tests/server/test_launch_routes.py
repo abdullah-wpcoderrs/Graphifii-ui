@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 import websockets
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 
 from graphify.server.db import get_session_factory
 from graphify.server.models import ExtractionRun, ExtractionRunStatus, Project, ProjectStatus
@@ -92,6 +92,109 @@ async def test_launch_returns_409_for_an_already_in_flight_project(app_client, t
     finally:
         async with session_factory() as db:
             await db.execute(delete(Project).where(Project.repo_name == repo_name))
+            await db.commit()
+
+
+async def test_ready_project_rerun_creates_a_fresh_immutable_run(
+    app_client, test_user, monkeypatch
+):
+    """The dashboard/workspace rerun action reuses the stable Project row but
+    must create a new ExtractionRun and clear every projection of the previous
+    READY attempt. The old run remains immutable history."""
+    from types import SimpleNamespace
+
+    from graphify.server.routes import launch as launch_module
+
+    user_id, cookie = test_user
+    session_factory = get_session_factory()
+    repo_name = f"{ZZ_PYTEST_PREFIX}rerun/repo-{uuid.uuid4().hex[:8]}"
+
+    async with session_factory() as db:
+        project = Project(
+            user_id=user_id,
+            repo_name=repo_name,
+            repo_url="https://github.com/x/original.git",
+            default_branch="main",
+            provider="github",
+            status=ProjectStatus.READY,
+            progress_percent=100,
+            status_message="Extraction complete",
+            graph_json_url="/data/workspaces/old-run/graph.json",
+        )
+        db.add(project)
+        await db.flush()
+        previous_run = ExtractionRun(
+            project_id=project.id,
+            status=ExtractionRunStatus.READY,
+            repo_url=project.repo_url,
+            repo_full_name=project.repo_name,
+            provider=project.provider,
+            default_branch=project.default_branch,
+            llm_provider="openai",
+            progress_percent=100,
+            status_message="Extraction complete",
+        )
+        db.add(previous_run)
+        await db.flush()
+        project.current_run_id = previous_run.id
+        await db.commit()
+        project_id = project.id
+        previous_run_id = previous_run.id
+
+    async def fake_credential(_db):
+        return SimpleNamespace(provider="openai", model="gpt-4.1-mini")
+
+    monkeypatch.setattr(launch_module, "_active_llm_credential", fake_credential)
+
+    try:
+        response = await app_client.post(
+            "/api/projects",
+            json={
+                "repo_full_name": repo_name,
+                "repo_url": "https://github.com/x/original.git",
+                "provider": "github",
+                "default_branch": "main",
+            },
+            cookies={"graphify_session": cookie},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {
+            "project_id": str(project_id),
+            "run_id": response.json()["run_id"],
+            "status": "CLONING",
+            "progress_percent": 0,
+            "message": "Queued for provisioning",
+            "error": None,
+            "graph_json_url": None,
+            "terminal": False,
+            "updated_at": response.json()["updated_at"],
+        }
+
+        async with session_factory() as db:
+            persisted_project = await db.get(Project, project_id)
+            runs = (
+                await db.execute(
+                    select(ExtractionRun)
+                    .where(ExtractionRun.project_id == project_id)
+                    .order_by(ExtractionRun.created_at)
+                )
+            ).scalars().all()
+
+        assert persisted_project is not None
+        assert persisted_project.current_run_id != previous_run_id
+        assert persisted_project.graph_json_url is None
+        assert persisted_project.progress_percent == 0
+        assert len(runs) == 2
+        assert runs[0].id == previous_run_id
+        assert runs[0].status is ExtractionRunStatus.READY
+        assert runs[1].id == persisted_project.current_run_id
+        assert runs[1].status is ExtractionRunStatus.QUEUED
+        assert runs[1].llm_provider == "openai"
+        assert runs[1].llm_model == "gpt-4.1-mini"
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(Project).where(Project.id == project_id))
             await db.commit()
 
 
@@ -551,6 +654,51 @@ async def test_cancel_during_deploy_trigger_stops_and_releases_the_shared_slot(
 
 
 # --- WS /ws/projects/{id} ----------------------------------------------------
+
+
+async def test_websocket_disconnect_during_initial_snapshot_is_normal(monkeypatch):
+    """A browser may replace its first socket during hydration after the
+    handshake but before the initial snapshot is sent. That must end quietly
+    instead of escaping as an ASGI application error."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from fastapi import WebSocketDisconnect
+
+    from graphify.server.routes import launch as launch_module
+
+    project = SimpleNamespace(
+        id=uuid.uuid4(),
+        current_run_id=uuid.uuid4(),
+        status=ProjectStatus.CLONING,
+        progress_percent=0,
+        status_message="Queued for provisioning",
+        error_message=None,
+        graph_json_url=None,
+        updated_at=None,
+    )
+
+    class DisconnectingWebSocket:
+        accepted = False
+        sends = 0
+
+        async def accept(self):
+            self.accepted = True
+
+        async def send_json(self, _payload):
+            self.sends += 1
+            raise WebSocketDisconnect(code=1006)
+
+    async def fake_authenticate(_websocket, _project_id):
+        return project
+
+    monkeypatch.setattr(launch_module, "_authenticate_ws", fake_authenticate)
+    websocket = DisconnectingWebSocket()
+
+    await launch_module.project_progress_ws(cast(Any, websocket), project.id)
+
+    assert websocket.accepted is True
+    assert websocket.sends == 1
 
 
 def test_websocket_rejects_missing_and_forged_cookies():

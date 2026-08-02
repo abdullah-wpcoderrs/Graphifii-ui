@@ -18,6 +18,7 @@ import {
   Project,
 } from "../lib/api";
 import { ApiError } from "../lib/api-errors";
+import { RerunProjectButton } from "./rerun-project-button";
 import { Spinner } from "./ui";
 
 type RepositoriesScreenProps = {
@@ -94,12 +95,23 @@ function RepositoryAction({ repository }: { repository: Repository }) {
 
   if (repository.projectState === "ready" && repository.workspaceId) {
     return (
-      <Link
-        className="repository-action"
-        href={`/workspace/${repository.workspaceId}`}
-      >
-        Resume Workspace
-      </Link>
+      <div className="repository-action-cluster">
+        <Link
+          className="repository-action"
+          href={`/workspace/${repository.workspaceId}`}
+        >
+          Resume Workspace
+        </Link>
+        <RerunProjectButton
+          className="repository-action is-rerun"
+          project={{
+            repoFullName: `${repository.owner}/${repository.name}`,
+            repoUrl: repository.htmlUrl,
+            provider: repository.provider,
+            defaultBranch: repository.defaultBranch,
+          }}
+        />
+      </div>
     );
   }
 

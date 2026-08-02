@@ -3,7 +3,8 @@
 Run locally with:
     cd graphify
     uv run graphify-server
-    # equivalent to: uv run uvicorn graphify.server.app:app --reload --port 8000
+    # For source auto-reload instead:
+    # uv run uvicorn graphify.server.app:app --reload --port 8000
 
 This module wires up settings validation, CORS, the health check, and all
 route modules (auth from Phase 2; projects/github/integrations/admin from
@@ -16,7 +17,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from graphify.server.config import get_settings
@@ -38,6 +39,12 @@ logger = logging.getLogger("graphify.server.app")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from graphify.server.redis_queue import build_redis_run_queue
+    from graphify.server.readiness import wait_for_database
+
+    # A suspended Neon branch may need several seconds to wake. Do not expose
+    # the API until a real SQL round trip succeeds; if the bounded retries are
+    # exhausted, startup fails and the container restart policy tries again.
+    await wait_for_database()
 
     run_queue = build_redis_run_queue(settings)
     if run_queue is not None:
@@ -98,6 +105,10 @@ app.include_router(admin_data_router)
 
 @app.get("/health")
 async def health() -> dict:
+    from graphify.server.readiness import database_is_ready
+
+    if not await database_is_ready():
+        raise HTTPException(status_code=503, detail="database unavailable")
     return {"status": "ok"}
 
 
@@ -105,4 +116,7 @@ def run() -> None:
     """Entry point for `uv run graphify-server` (see [project.scripts])."""
     import uvicorn
 
-    uvicorn.run("graphify.server.app:app", host="0.0.0.0", port=8000, reload=True)
+    # Production uses a single process so the platform entrypoint's exec means
+    # PID 1 is the actual uvicorn server. For source-development auto-reload,
+    # run `uv run uvicorn graphify.server.app:app --reload --port 8000`.
+    uvicorn.run("graphify.server.app:app", host="0.0.0.0", port=8000, reload=False)

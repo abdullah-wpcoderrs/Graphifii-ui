@@ -146,7 +146,20 @@ dev = [
 package = true
 
 [tool.setuptools]
-packages = ["graphify", "graphify.extractors", "graphify.exporters", "graphify.server"]
+# Explicit rather than auto-discovered, so a stray directory never becomes a
+# published package. The cost is that a genuinely new subpackage must be added
+# here — omitting graphify.server.routes made every wheel-installed copy of the
+# API fail at import with "No module named 'graphify.server.routes'", which
+# only surfaced when the API was first containerized. Keep this list in sync
+# with `find graphify -name __init__.py`; tests/server/test_deployment_security.py
+# now asserts that.
+packages = [
+    "graphify",
+    "graphify.extractors",
+    "graphify.exporters",
+    "graphify.server",
+    "graphify.server.routes",
+]
 include-package-data = false
 
 [tool.setuptools.package-data]

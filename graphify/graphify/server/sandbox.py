@@ -117,7 +117,18 @@ async def launch_project_on_railway(
             "must all be set (see docs/railway-setup.md)"
         )
 
+    # Every variable the extraction container will ever see. `replace: True`
+    # below makes this map exhaustive rather than additive, which is the
+    # property the sandbox boundary rests on: the extractor runs code paths
+    # driven by an untrusted repository, so it must never inherit DATABASE_URL,
+    # SESSION_SECRET, RAILWAY_API_TOKEN, or a previous run's credentials. If a
+    # variable is not listed here, it does not exist in that container.
     env_vars = {
+        # Selects the extractor role in the unified platform image. Without
+        # it the image refuses to start at all — it has no default role — so a
+        # missing value fails visibly at launch instead of silently starting
+        # the wrong process. See scripts/platform_entrypoint.py.
+        "SERVICE_ROLE": "extractor",
         "REPO_URL": repo_url,
         "PROJECT_ID": project_id,
         "RUN_ID": run_id,

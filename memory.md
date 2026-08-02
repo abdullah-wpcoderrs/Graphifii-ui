@@ -1,204 +1,267 @@
-# Memory — Graphify Phase 4 Backend: COMPLETE (Admin Auth, Railway Sandbox, Usage Tracking, Tests)
+# Memory — Graphify secure queue and unified Railway platform
 
-Last updated: 2026-08-01
-
-## Status in one line
-
-The entire Phase 4 **backend** is built, live-tested against the real
-Neon DB, and proven end-to-end against the real Railway API — including a
-full real launch (repo → Railway container → extraction → graph uploaded →
-READY). AI spend tracking and a 63-test automated suite were added after
-that. **Nothing left on the backend side except optional follow-ups** (see
-below). The Phase 4 **frontend** has not been started at all.
-
-See `graphify/CLAUDE.md` for the operational how-to (restart the server,
-rebuild/push the sandbox image, run migrations, run tests, debug Railway
-directly) — this file is the narrative history; that one is the reference
-card.
+Last updated: 2026-08-02 08:32 WAT
 
 ## What was built
 
-**Isolated admin authentication** (separate from GitHub-user auth entirely):
-- `graphify/graphify/server/models.py` — `Admin` model (own table), `UsageEvent`
-  model, `is_active` on `User`, provisioning-progress columns on `Project`.
-- `graphify/graphify/server/admin_sessions.py` — argon2 hashing, `get_current_admin`
-  dependency, `graphify_admin_session` cookie. Isolated from user sessions via
-  3 independent things: separate secret, separate itsdangerous salt, separate
-  cookie name.
-- `graphify/graphify/server/routes/admin_auth.py` — login (5-attempt lockout,
-  uniform error message, timing-equalized), logout, me.
-- `graphify/graphify/server/routes/admin.py` — re-gated onto `get_current_admin`.
-  `Role.ADMIN` on `User` is now informational only.
-- `graphify/graphify/server/routes/admin_data.py` — usage/analytics/users endpoints.
-- `graphify/scripts/seed_admin.py` — reads `ADMIN_EMAIL`/`ADMIN_PASSWORD` from
-  real env vars or `graphify/.env` directly. Idempotent (re-run = password reset).
-
-**Project launch + WebSocket streaming:**
-- `graphify/graphify/server/routes/launch.py` — launch, cancel, status callback,
-  artifacts upload, usage report, WebSocket progress stream (polls the DB row,
-  1s interval — correct across reconnects/multi-replica, unlike an in-memory bus).
-- `graphify/graphify/server/config.py` — all the new settings, incl.
-  `sandbox_callback_base_url` (deliberately separate from `backend_url`).
-- `graphify/graphify/server/sandbox.py` — the real, working Railway GraphQL client.
-
-**Sandbox container:**
-- `graphify/Dockerfile.sandbox` + `graphify/scripts/sandbox_entrypoint.py` —
-  clones, runs `graphify update` (+ `graphify label` if a key is present),
-  builds `files.json`, uploads both artifacts, reports progress throughout.
-
-**AI usage/cost tracking** (added after Railway was proven working):
-- `graphify/graphify/server/usage.py` — `record_usage()` + `estimate_cost()`
-  (maps the UI's `"anthropic"` to llm.py's `"claude"` pricing key).
-- Wired into **two** real call sites:
-  1. Admin credential verify (`routes/admin.py`) — parses the real `usage`
-     field from the OpenAI/Anthropic API response.
-  2. Sandbox community labeling — graphify already writes
-     `Token cost: N input · M output` into `GRAPH_REPORT.md`
-     (`label_communities()`'s `usage_out` param); the entrypoint parses that
-     line (`parse_token_cost()`) and POSTs it to a new endpoint,
-     `POST /api/internal/projects/{id}/usage`.
-
-**Automated tests** (first FastAPI-server coverage this project has had):
-- `graphify/tests/server/` — 63 tests, all passing. 42 pure-logic (no DB/network:
-  config validation, cookie isolation, cost math, sandbox entrypoint parsing/
-  URL-building). 21 integration, against the **real Neon DB**
-  (`test_launch_routes.py`, `test_admin_routes.py`): login/lockout/isolation,
-  launch validation + 409 duplicate guard, callbacks, real WebSocket connections.
-- **Safety property, load-bearing if this suite is ever extended:** the dev DB
-  has a real OpenAI key and real Railway credentials configured. Tests never
-  call either for real — anything that would spend money or deploy a
-  container is monkeypatched. Verified zero leftover test rows after a run.
-
-**Migrations:** `c7f2a91be4d3` (admin table), `d4e8b2317ac6` (usage_events +
-progress columns + users.is_active). **Applied to the real Neon DB.**
-`alembic check` confirms no drift.
-
-**Docs added:** `graphify/docs/railway-setup.md` (full account/service setup,
-GHCR push walkthrough, container-testing steps), `graphify/CLAUDE.md`
-(operational reference — commands to restart/rebuild/test/debug), both
-`.env.example` files updated with every new var and why it exists.
+- The earlier Phase 4 backend remains complete: isolated admin authentication,
+  project launch/callback/WebSocket flow, Railway sandbox execution, usage
+  tracking, Neon migrations, and the backend test suite were previously proven
+  end to end.
+- Security checklist Phase 0 and Phase 1 code work in `graphify/issues.md` is
+  implemented: hardened image inputs, immutable `ExtractionRun` records,
+  database-backed singleton dispatch, per-run callback credentials, exact
+  deployment correlation/cancellation, idempotent callback events, quotas,
+  leases, and stale-callback rejection. Operational/staging proof items remain.
+- Redis Streams queue support is implemented and documented in
+  `graphify/docs/redis-run-queue.md`. Redis carries only `run_id`; Neon remains
+  authoritative and the database fallback scan preserves runs when Redis is
+  unavailable.
+- A dedicated worker image exists at `graphify/Dockerfile.worker`. The local
+  `graphify-run-worker:latest` image was rebuilt successfully and smoke-tested
+  as non-root with Redis, SQLAlchemy, psycopg, and worker imports.
+- The unified-platform implementation through the local and extractor staging
+  gates is complete and tracked in
+  `graphify/docs/unified-railway-platform-plan.md`. Created or modified work
+  includes `graphify/Dockerfile.platform`,
+  `graphify/scripts/platform_entrypoint.py`, the repository-root
+  `compose.yaml`, Neon direct-migration configuration, sandbox role injection,
+  `.env.example`, dependency metadata, and platform/Compose/security tests.
+- The unified checklist records evidence beside completed tasks. Phases 1–3
+  are complete, including a genuine Railway extractor run that closed the
+  Phase 2 exit gate. Phase 5 restart/persistence behavior is verified locally.
+  Phase 6 now has a tested immutable GHCR release candidate. Railway production
+  variables, same-digest service selection, volumes, private topology, and the
+  remaining Phase 7 release tests are still pending.
+- `Dockerfile.platform` now installs the optional `sql` extra. The published
+  Linux image imports `tree_sitter_sql` and a runtime smoke schema produced 3
+  nodes and 3 edges.
+- `project_progress_ws` now treats a disconnect during the initial snapshot as
+  a normal browser disconnect. The focused regression test passed and the
+  published image was inspected to confirm that it contains the guard.
 
 ## Decisions made
 
-- **Admins are a separate principal, not a `User` with a role flag.** No
-  GitHub identity, own login, own cookie — a compromised or self-registered
-  GitHub account must never become an admin.
-- **`sandbox_callback_base_url` is separate from `backend_url`.** In local
-  dev they must differ (OAuth + cookie `Secure` flag vs. what a Railway
-  container can actually reach). Same origin in production; sandbox var left
-  unset there.
-- **WebSocket progress polls the DB, not an in-memory event bus** — correct
-  across reconnects and multiple backend instances.
-- **Progress transport is push** (sandbox → backend callback), not backend
-  polling Railway's API.
-- **User/admin suspension is enforced on every request**, not just at login.
-- **Sandbox AI spend is read from `GRAPH_REPORT.md`**, not recomputed —
-  graphify already tracks it; the entrypoint just surfaces the number.
-- **Confirmed graph.json shape** (from a real extraction run): networkx
-  node-link format. Connections are under **`links`, not `edges`** — matters
-  for whoever wires the React Flow graph panel.
-- **`files.json` shape** (sandbox-entrypoint artifact, not from graphify
-  itself): `{files: [{path, size}], count, truncated}`.
-- **Integration tests use the real Neon DB, no SQLite fallback** — the
-  models use Postgres-specific column types. Tests are made safe via
-  monkeypatching anything that would reach a paid API or Railway, not by
-  avoiding the real DB.
+- The existing Neon project is the only PostgreSQL provider and source of
+  truth. Do not provision Railway PostgreSQL. API and worker use a pooled Neon
+  URL; migrations use a separate direct Neon URL. Production, staging, and
+  development should use separate Neon branches.
+- Railway owns application compute and managed Redis. The intended Railway
+  application roles are API, worker, and sandboxed extractor, all built from
+  one immutable platform image but executed as isolated services/deployments.
+- “Sandbox,” “sandboxed extractor,” and “extractor” are the same existing
+  workload. `Dockerfile.sandbox` plus `scripts/sandbox_entrypoint.py` is the
+  current baseline; the unified image rehosts that behavior as
+  `SERVICE_ROLE=extractor`. It is not a new extraction system.
+- The sandbox security boundary must remain: isolated Railway deployment,
+  ephemeral `/workspace`, run-scoped variables, per-run callback auth,
+  cancellation, cleanup, non-root execution, and no Neon credentials.
+- `Dockerfile.worker` and `Dockerfile.sandbox` stay available through a rollback
+  window. Do not retire them until staging and production parity is proven.
+- Redis is delivery acceleration, not correctness. Neon state, constraints,
+  leases, and exact deployment IDs remain authoritative.
+- Keep one API replica while artifacts live on an attached filesystem volume.
+  Move artifacts to shared object storage before horizontal API scaling.
+- Secrets and connection strings must be injected at runtime and must never be
+  copied into images, Compose files, documentation, tests, or this memory.
+- Use a new immutable GHCR tag for every build. Pushing an image does not update
+  Railway automatically; change each service's source reference and redeploy.
+  Preserve the previous digest for rollback.
+- Database migration updates Neon schema only; it never assigns Railway roles.
+  API and worker receive static `SERVICE_ROLE=api|worker` variables, a one-shot
+  migration job receives `SERVICE_ROLE=migrate` plus `DATABASE_URL_DIRECT`, and
+  the worker injects `SERVICE_ROLE=extractor` automatically per extraction run.
+- `SANDBOX_CALLBACK_BASE_URL` is the callback base when it is set. A Cloudflare
+  quick tunnel hostname is disposable; after changing it in `.env`, recreate
+  API and worker containers because running containers keep their old
+  environment snapshot.
 
-## Problems solved (roughly chronological)
+## Problems solved
 
-- **`python-multipart` was missing** — FastAPI raises at import time when a
-  route declares `UploadFile` without it; the app wouldn't have started.
-- **Reused-secret footgun** — startup validator now refuses to boot if
-  `ADMIN_SESSION_SECRET` collides with either other secret.
-- **`seed_admin.py` only read `os.environ`** but docs said to use `.env` —
-  fixed with a custom `.env` reader.
-- **`graphify extract` doesn't exist** — real command is `graphify update`.
-- **graphify doesn't emit `files.json`** — built in the sandbox entrypoint instead.
-- **The ephemeral container had nowhere to persist output** — added the
-  artifacts-upload endpoint.
-- **A running server does not pick up edited `.py` files** (no `--reload`) —
-  cost real time chasing a "silently broken" container that was actually
-  just talking to stale backend code. Now documented prominently in
-  `graphify/CLAUDE.md`'s first section.
-- **The first `serviceInstanceDeploy` GraphQL mutation was flatly rejected**
-  by Railway's schema validator — it was guessed from documentation prose,
-  not the real schema. Fixed by querying Railway's live schema directly
-  (`__type` introspection) instead of guessing again: the real flow is two
-  separate calls (`variableCollectionUpsert` with `skipDeploys: true`, then
-  `serviceInstanceDeploy(serviceId, environmentId)` — which returns a bare
-  boolean, not a deployment id; a `deployments` query afterward finds the id
-  for tracking, best-effort).
-- **Railway's dashboard log viewer has a real display delay** — an early
-  test deploy looked "silent" (only "Starting Container", nothing else) and
-  was wrongly suspected to mean the container wasn't running at all. Pulling
-  the log straight from Railway's GraphQL API (`deploymentLogs`) proved it
-  was actually a display-timing issue, not a real problem — the same
-  container later completed successfully.
-- **The sandbox image was missing the `openai`/`anthropic` SDKs** — AI
-  community-naming silently failed every run and fell back to placeholder
-  names ("Community 1", etc.), discovered by pulling a real deployment's log
-  after the first genuinely successful Railway run. Fixed by installing the
-  `[openai,anthropic,gemini]` extras in `Dockerfile.sandbox`; image rebuilt
-  and re-pushed.
-- **Settings() in unit tests silently read the real `graphify/.env`** for
-  any field not explicitly passed, making three config tests pass/fail based
-  on what happened to be in the developer's real `.env` rather than the code
-  under test. Fixed with `_env_file=None` in a shared `_settings()` test helper.
+- The architecture documentation now explicitly shows how external Neon stays
+  isolated outside Docker Compose/Railway and how API/worker initiate outbound
+  TLS connections to it.
+- The documentation now removes the ambiguity between the old sandbox image
+  and the new extractor role, including parity requirements and rollback intent.
+- The scattered Railway deployment model is being consolidated around one
+  role-based image and one centralized runtime-variable model without placing
+  multiple long-running processes in one container.
+- The stale callback hostname was traced to the value actually present in
+  `graphify/.env` and in the already-created worker container. `.env` was
+  corrected to the active `citation-contribution-rom-pull.trycloudflare.com`
+  tunnel and Compose services were recreated. Railway then resolved the
+  callback and all progress, usage, artifact, and terminal reports returned
+  HTTP 200.
+- The frontend appeared stuck because the extractor could not report to the
+  stale callback host. Once callback resolution was fixed, the genuine run
+  reached Graph ready. A separate WebSocket code-1006 traceback was also fixed;
+  it was a browser hydration disconnect, not a Neon or extraction failure.
+- Railway's five zero-node JSON messages were confirmed non-fatal metadata
+  warnings. The separate 49-file SQL warning represented real graph coverage
+  loss and is fixed in the new platform image through the `sql` extra.
 
-## Current state — verified live, end-to-end
+## Successful verification runs
 
-- Admin login, lockout, cookie isolation (both directions).
-- All admin data endpoints, launch error paths (401/400/409/503).
-- Full callback + WebSocket pipeline (real and simulated).
-- **A complete real Railway launch**, triggered through the actual
-  `POST /api/projects` route: Railway deployed the real GHCR image, the
-  container cloned `pypa/sampleproject`, ran extraction (17 nodes / 15
-  links / 6 communities), attempted AI labeling (failed gracefully at the
-  time — missing SDK, since fixed), uploaded both artifacts, and reported
-  READY — entire round trip in ~20 seconds. Confirmed via the real database
-  row (`graph_json_url`, `sandbox_id`, `started_at`/`finished_at`) and via
-  Railway's own raw log.
-- Real AI usage recording, both integration points (admin verify, sandbox
-  labeling), confirmed with real token counts and real cost calculation.
-- 63/63 automated tests passing, real DB, zero leftover rows, zero real
-  external calls.
-- Sandbox image rebuilt with the SDK fix and re-pushed to GHCR
-  (`ghcr.io/abdullah-wpcoderrs/graphify-sandbox:latest`), confirmed public
-  and pullable.
+- Local Compose migration reached the disposable Neon branch and reported
+  Alembic head `f83a49b127d1`.
+- Redis, API, and worker were rebuilt/recreated together. Redis and API became
+  healthy, the worker started, and the Neon-backed `GET /health` returned HTTP
+  200.
+- API persistence survived `docker compose up -d --force-recreate api`; the
+  named `/data/workspaces` volume remained intact. An immediate curl during
+  process replacement can reset before readiness, so the reliable procedure
+  uses Compose `--wait` or a health polling loop.
+- Railway successfully extracted
+  `https://github.com/abdullah-wpcoderrs/byte-earn` from branch `main`:
+  project `eb25089e-e5d3-4c9c-9023-8734540a55bf`, run
+  `50aa6189-df55-419b-8622-f8e41a1d3359`, 1,309 nodes, 2,762 edges, 89
+  communities. Artifacts uploaded with `ok:true`, Railway logged
+  `[sandbox] done`, and the local frontend reached Graph ready.
+- The initial Railway verification above used the earlier unified
+  `railway-test-1` tag. It proved the hybrid API/worker/extractor flow but did
+  not include SQL parsing.
+- New release candidate pushed to GHCR:
+  `ghcr.io/abdullah-wpcoderrs/graphify-platform:railway-sql-ws-20260802T070343Z`.
+  OCI index digest:
+  `sha256:f63820e15d8f8807e4c16e8dc36489aecad5f9f710f4e13345d3fcd4d36d0972`.
+  Linux/amd64 manifest:
+  `sha256:504c7b3157ebe34e98a720782b74118a3283eb18ac219444c1e4fbcdadff2f3f`.
+- New image runtime checks: `tree_sitter_sql=ok`; SQL smoke extraction produced
+  3 nodes/3 edges; WebSocket initial-disconnect guard present.
+- Focused verification after the fixes: 17 launch-route tests passed against
+  the disposable Neon test database; deployment/security plus WebSocket checks
+  passed (9 tests); Ruff, production-route Pyright, and `git diff --check`
+  passed. Host-only SQL tests skipped where the optional grammar was absent,
+  which is why the built-image SQL smoke was required.
 
-## What's left (optional follow-ups, not blockers)
+## Commands used for the verified local and GHCR run
 
-- The rebuilt image (with the AI SDK fix) hasn't had its own fresh
-  end-to-end Railway run yet — the *previous* image was proven working;
-  this one should behave identically but hasn't been explicitly re-verified.
-- Sandbox teardown / cleanup after a job finishes is not implemented
-  (Phase 7 scope per the original plan).
-- Token refresh rotation for expired GitHub/GitLab tokens (Phase 5 scope).
-- A search for any old Phase-3-era admin tests asserting the superseded
-  GitHub-role 403 contract, to confirm none linger elsewhere in the repo.
+From the workspace root:
+
+```bash
+cd "/Users/mac/Documents/Graph UI"
+
+docker compose --profile migrate run --rm migrate
+docker compose up -d --build --force-recreate --wait --wait-timeout 120 redis api worker
+docker compose ps
+curl -i http://localhost:8000/health
+docker compose logs --tail=120 api worker redis
+
+docker compose up -d --force-recreate --wait api
+curl -i http://localhost:8000/health
+```
+
+Focused repository checks from `graphify/`:
+
+```bash
+cd "/Users/mac/Documents/Graph UI/graphify"
+
+.venv/bin/pytest -q tests/server/test_launch_routes.py
+.venv/bin/pytest -q tests/server/test_deployment_security.py \
+  tests/server/test_launch_routes.py \
+  -k 'platform_image or websocket_disconnect_during_initial_snapshot'
+.venv/bin/ruff check tests/server/test_deployment_security.py \
+  graphify/server/routes/launch.py tests/server/test_launch_routes.py
+git diff --check
+.venv/bin/graphify update .
+```
+
+Exact release build, smoke, push, and remote verification sequence:
+
+```bash
+cd "/Users/mac/Documents/Graph UI/graphify"
+
+GRAPHIFY_IMAGE_REF="ghcr.io/abdullah-wpcoderrs/graphify-platform:railway-sql-ws-20260802T070343Z"
+
+docker buildx build \
+  --platform linux/amd64 \
+  -f Dockerfile.platform \
+  -t "$GRAPHIFY_IMAGE_REF" \
+  --load \
+  .
+
+docker run --rm --platform linux/amd64 --entrypoint python \
+  "$GRAPHIFY_IMAGE_REF" \
+  -c 'import tempfile; from pathlib import Path; import tree_sitter_sql; from graphify.extract import extract; d=tempfile.TemporaryDirectory(); p=Path(d.name)/"schema.sql"; p.write_text("CREATE TABLE users (id INT PRIMARY KEY);\n"); result=extract([p], cache_root=Path(d.name), parallel=False); print("SQL nodes=%d edges=%d" % (len(result["nodes"]), len(result["edges"]))); assert result["nodes"]'
+
+docker run --rm --platform linux/amd64 --entrypoint python \
+  "$GRAPHIFY_IMAGE_REF" \
+  -c 'import inspect; from graphify.server.routes.launch import project_progress_ws; source=inspect.getsource(project_progress_ws); assert "Keep this inside the disconnect guard too" in source; print("websocket_initial_disconnect_guard=ok")'
+
+docker push "$GRAPHIFY_IMAGE_REF"
+docker buildx imagetools inspect "$GRAPHIFY_IMAGE_REF"
+```
+
+The Railway extraction was launched through the local Graphify UI/API and
+worker, not through a manual Railway CLI command. The worker created the exact
+Railway deployment and injected the run-scoped variables.
+
+## Current state
+
+- The working tree is intentionally uncommitted. Preserve all existing changes.
+  Current platform-related files include modified `.env.example`,
+  `alembic/env.py`, `graphify/server/config.py`, `graphify/server/sandbox.py`,
+  `pyproject.toml`, and related tests, plus untracked `compose.yaml`,
+  `Dockerfile.platform`, `scripts/platform_entrypoint.py`, platform/Compose
+  tests, and `docs/unified-railway-platform-plan.md`.
+- Treat checked tasks and their evidence annotations in
+  `graphify/docs/unified-railway-platform-plan.md` as completed work. Do not
+  restart Phase 1–3 from scratch.
+- Local unified image/Compose work is implemented and locally validated.
+- The Phase 2 Railway extraction gate is complete on the earlier unified image.
+- The SQL/WebSocket release candidate is published but is **not yet confirmed
+  as selected or deployed in Railway**. Do not describe the new digest as
+  deployed until the dashboard source is updated and a fresh extraction proves
+  the missing-SQL warning is gone.
+- Railway Shared Variables, Neon/Redis production wiring, same-digest API and
+  worker deployment, API volume, staging release tests, and production rollout
+  are not yet fully configured or verified.
+- The dedicated worker image is ready locally but was not recorded as pushed to
+  a registry during this session.
+- A frontend "rerun extraction" feature exists
+  (`frontend/app/components/rerun-project-button.tsx`), wired into both
+  `dashboard-screen.tsx` and `repositories-screen.tsx`, and already documented
+  in `frontend/ui-registry.md`. It was built outside this file's tracking but
+  is real, integrated, and passing local review — not a stray/unused file.
+- This sandbox's Bash tool cannot reach `railway.app`/`backboard.railway.app`
+  (DNS resolves via `nslookup` but `curl` fails to connect even with the
+  sandbox override) even though other hosts like `api.github.com` work — a
+  network allowlist blocks Railway specifically. Driving Phase 4/6 Railway
+  config via its GraphQL API from this environment is not currently possible;
+  the owner must apply those steps manually in the Railway dashboard (exact
+  variable names/values were handed over in-session, sourced from
+  `graphify/.env`).
+- All of `tests/server/` passes locally (156 passed, 26 skipped — the skips
+  are SQL-grammar tests that only run inside the built Linux image).
 
 ## Next session starts with
 
-**The entire Phase 4 frontend is unstarted.** Per
-`frontend/docs/TASK_CHECKLIST.md`:
-1. Split `/dashboard` (recent projects only) from a new `/repositories` page.
-2. Build the isolated admin frontend — its own login screen (separate from
-   the GitHub-authed app) plus usage/analytics/users screens, all now backed
-   by real, tested endpoints.
-3. New `/projects` page — **blocked on a UI reference from the user**
-   (they mentioned wanting something modeled on the Claude Cowork
-   agent-mode IDE; get that reference before designing this screen).
-4. New `/settings` page, and the Docs/Help external link — **need the real
-   Graphify docs URL from the user** before wiring the link.
-5. Replace `workspace-fixtures.ts` with real data — the backend contract is
-   now fully proven live (real `graph.json`/`files.json` shapes confirmed,
-   see Decisions above).
-6. Real WebSocket client on the launch screen, replacing the mock event
-   playback — the backend's `/ws/projects/{id}` is proven working.
+1. Read `graphify/docs/unified-railway-platform-plan.md` and preserve every
+   checked item; begin at the first unchecked exit gate or dashboard task.
+2. Run the focused platform, Compose, deployment-security, sandbox, worker, and
+   Redis test suites to reconfirm the dirty worktree before deployment.
+3. Update the Railway extractor source to
+   `railway-sql-ws-20260802T070343Z` (prefer the recorded digest), redeploy, and
+   repeat the `byte-earn` extraction. Confirm there is no
+   `tree_sitter_sql not installed` warning.
+4. When deploying API and worker on Railway, point both at the same digest and
+   set `SERVICE_ROLE=api` / `SERVICE_ROLE=worker`. The extractor role remains
+   automatically injected per run; the migration job uses
+   `SERVICE_ROLE=migrate` plus `DATABASE_URL_DIRECT`.
+5. Configure Phase 4 Railway Shared Variables without exposing values:
+   pooled Neon URL for API/worker, direct Neon URL for migrations, private Redis
+   URL, role variables, and existing Railway identifiers/credentials.
+6. Continue through storage, same-digest deployment, staging release, and only
+   then deprecate the dedicated worker/sandbox images.
 
 ## Open questions
 
-- Should GHCR stay public long-term, or move to a private package + Railway
-  pull credentials once this goes to production?
-- Is per-backend (not per-model) cost pricing (see `usage.py`'s docstring)
-  accurate enough long-term, or does it need per-model rates eventually?
+- Which Phase 0 operational tasks have already been done outside the repository
+  (secret rotation record, image scan, Neon restore policy, Redis persistence)?
+- Have Railway Shared Variables, stable egress/IP rules, Redis persistence, and
+  the API artifact volume already been configured manually?
+- Has Railway been updated from the earlier `railway-test-1` extractor image to
+  the SQL/WebSocket release candidate digest recorded above?
+- Should the first production rollout keep the existing dedicated sandbox image
+  as the extractor while API/worker move first, or promote all three roles to
+  the unified digest together after staging parity?
