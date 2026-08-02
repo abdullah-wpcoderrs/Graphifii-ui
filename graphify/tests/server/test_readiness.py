@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from graphify.server import readiness
 
 
 async def test_database_is_ready_requires_a_successful_probe(monkeypatch) -> None:
-    async def successful_probe() -> None:
+    async def successful_probe(*, timeout_seconds: float) -> None:
         return None
 
     monkeypatch.setattr(readiness, "probe_database", successful_probe)
@@ -19,7 +21,7 @@ async def test_database_is_ready_requires_a_successful_probe(monkeypatch) -> Non
 async def test_database_is_not_ready_when_the_probe_fails(monkeypatch) -> None:
     disposed = []
 
-    async def failed_probe() -> None:
+    async def failed_probe(*, timeout_seconds: float) -> None:
         raise OSError("unreachable")
 
     class FakeEngine:
@@ -33,12 +35,48 @@ async def test_database_is_not_ready_when_the_probe_fails(monkeypatch) -> None:
     assert disposed == [True]
 
 
+async def test_probe_database_times_out_on_a_stalled_connect(monkeypatch) -> None:
+    class StalledConnection:
+        async def __aenter__(self):
+            await asyncio.sleep(10)
+            raise AssertionError("should have timed out before connecting")
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    class FakeEngine:
+        def connect(self):
+            return StalledConnection()
+
+    monkeypatch.setattr(readiness, "get_engine", lambda: FakeEngine())
+
+    with pytest.raises(asyncio.TimeoutError):
+        await readiness.probe_database(timeout_seconds=0.01)
+
+
+async def test_database_is_not_ready_when_the_probe_times_out(monkeypatch) -> None:
+    disposed = []
+
+    async def stalled_probe(*, timeout_seconds: float) -> None:
+        raise asyncio.TimeoutError()
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            disposed.append(True)
+
+    monkeypatch.setattr(readiness, "probe_database", stalled_probe)
+    monkeypatch.setattr(readiness, "get_engine", lambda: FakeEngine())
+
+    assert await readiness.database_is_ready(timeout_seconds=0.01) is False
+    assert disposed == [True]
+
+
 async def test_startup_retries_until_neon_is_ready(monkeypatch) -> None:
     attempts = 0
     sleeps: list[float] = []
     disposed = []
 
-    async def eventually_ready() -> None:
+    async def eventually_ready(*, timeout_seconds: float) -> None:
         nonlocal attempts
         attempts += 1
         if attempts < 3:
@@ -66,7 +104,7 @@ async def test_startup_fails_after_bounded_retries(monkeypatch) -> None:
     attempts = 0
     disposed = []
 
-    async def never_ready() -> None:
+    async def never_ready(*, timeout_seconds: float) -> None:
         nonlocal attempts
         attempts += 1
         raise OSError("unreachable")
