@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 
 # Import models so they register on Base.metadata before autogenerate runs.
-from graphify.server.config import get_settings, normalize_database_url
+from graphify.server.config import resolve_migration_database_url
 from graphify.server.db import Base
 from graphify.server import models  # noqa: F401
 
@@ -37,10 +37,9 @@ target_metadata = Base.metadata
 # Normalized through the same helper Settings uses: this path never builds a
 # Settings object, so without it a quoted value or Neon's bare `postgresql://`
 # scheme reaches SQLAlchemy unfixed and fails on a missing psycopg2.
-_url = os.environ.get("DATABASE_URL")
 config.set_main_option(
     "sqlalchemy.url",
-    normalize_database_url(_url) if _url else get_settings().database_url,
+    resolve_migration_database_url(os.environ.get("DATABASE_URL")),
 )
 
 

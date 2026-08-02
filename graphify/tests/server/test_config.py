@@ -10,7 +10,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from graphify.server.config import Settings
+from graphify.server import config as config_module
+from graphify.server.config import Settings, resolve_migration_database_url
 
 _BASE_KWARGS = dict(
     frontend_url="http://localhost:3000",
@@ -203,3 +204,29 @@ def test_quoted_bare_scheme_is_both_unquoted_and_upgraded():
     # The combination that actually occurs in a Docker env_file.
     settings = _settings(database_url='"postgresql://u:p@h/db"')
     assert settings.database_url == "postgresql+psycopg://u:p@h/db"
+
+
+def test_migration_url_prefers_the_bare_environment_variable():
+    # SERVICE_ROLE=migrate promotes Neon's direct URL into DATABASE_URL for
+    # that process only; it must win over Settings without ever building one.
+    url = resolve_migration_database_url("postgresql://u:p@h/db")
+    assert url == "postgresql+psycopg://u:p@h/db"
+
+
+def test_migration_url_falls_back_to_settings_when_env_var_is_unset(monkeypatch):
+    fallback = _settings(database_url="postgresql+psycopg://fallback/db")
+    monkeypatch.setattr(config_module, "get_settings", lambda: fallback)
+
+    assert resolve_migration_database_url(None) == fallback.database_url
+
+
+def test_migration_url_falls_back_to_settings_when_env_var_is_whitespace_only(
+    monkeypatch,
+):
+    # normalize_database_url() strips a whitespace-only value to "" — that
+    # must not be handed to Alembic as sqlalchemy.url. Settings.database_url
+    # is the correct fallback, exactly as when the variable is unset.
+    fallback = _settings(database_url="postgresql+psycopg://fallback/db")
+    monkeypatch.setattr(config_module, "get_settings", lambda: fallback)
+
+    assert resolve_migration_database_url("   ") == fallback.database_url

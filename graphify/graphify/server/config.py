@@ -40,6 +40,20 @@ def normalize_database_url(value: str) -> str:
     return text
 
 
+def resolve_migration_database_url(raw_env_value: str | None) -> str:
+    """Pick the migration URL from the environment, falling back to Settings.
+
+    Used by ``alembic/env.py``. The bare `DATABASE_URL` environment variable
+    takes precedence when present (`SERVICE_ROLE=migrate` promotes Neon's
+    *direct* URL into it, and that process has none of the GitHub App or
+    session secrets a full `Settings` object requires). A whitespace-only
+    value must fall back to `Settings.database_url` rather than normalizing
+    to an empty string, which would hand Alembic an invalid `sqlalchemy.url`.
+    """
+    stripped = (raw_env_value or "").strip()
+    return normalize_database_url(stripped) if stripped else get_settings().database_url
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_REPO_ROOT / ".env",
