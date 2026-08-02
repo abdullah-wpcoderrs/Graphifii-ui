@@ -160,7 +160,12 @@ async def admin_login(
         max_age=ADMIN_SESSION_MAX_AGE,
         httponly=True,
         secure=is_secure_cookie(),
-        samesite="lax",
+        # See the matching comment on the GitHub session cookie in auth.py:
+        # this endpoint is called via cross-site fetch() from the deployed
+        # frontend, so SameSite must be None (with Secure, already guaranteed
+        # by is_secure_cookie() in production) or the cookie is set but never
+        # sent back on the next admin API call.
+        samesite="none",
         path="/",
     )
     return {"ok": True, "email": admin.email}
@@ -174,7 +179,7 @@ async def admin_logout(response: Response) -> dict:
         ADMIN_SESSION_COOKIE_NAME,
         httponly=True,
         secure=is_secure_cookie(),
-        samesite="lax",
+        samesite="none",
         path="/",
     )
     return {"ok": True}
