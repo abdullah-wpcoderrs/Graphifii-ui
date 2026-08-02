@@ -117,14 +117,41 @@ the same email resets that admin's password (12+ characters, argon2-hashed).
 
 ## Building & deploying the platform image
 
+### Push the image built by Docker Compose
+
+`docker compose up --build` creates the local image
+`graphify-platform:local`. Give that image an immutable GHCR tag, then push it:
+
+```bash
+cd "/Users/mac/Documents/Graph UI"
+
+# Prompts for a GitHub PAT with write:packages permission.
+docker login ghcr.io -u abdullah-wpcoderrs
+
+GRAPHIFY_RELEASE_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
+GRAPHIFY_IMAGE_REF="ghcr.io/abdullah-wpcoderrs/graphify-platform:${GRAPHIFY_RELEASE_TAG}"
+
+docker tag graphify-platform:local "$GRAPHIFY_IMAGE_REF"
+docker push "$GRAPHIFY_IMAGE_REF"
+docker buildx imagetools inspect "$GRAPHIFY_IMAGE_REF"
+```
+
+This pushes the exact local Compose image. Use this only when that image was
+built for `linux/amd64`, the Railway runtime architecture.
+
+### Recommended Railway release build
+
+Build and push an explicit `linux/amd64` image directly from the platform
+Dockerfile:
+
 ```bash
 cd graphify
-GRAPHIFY_IMAGE_REF="ghcr.io/abdullah-wpcoderrs/graphify-platform:<tag>"
+GRAPHIFY_RELEASE_TAG="$(date -u +%Y%m%dT%H%M%SZ)"
+GRAPHIFY_IMAGE_REF="ghcr.io/abdullah-wpcoderrs/graphify-platform:${GRAPHIFY_RELEASE_TAG}"
 
 docker buildx build --platform linux/amd64 -f Dockerfile.platform \
-  -t "$GRAPHIFY_IMAGE_REF" --load .
+  -t "$GRAPHIFY_IMAGE_REF" --push .
 
-docker push "$GRAPHIFY_IMAGE_REF"
 docker buildx imagetools inspect "$GRAPHIFY_IMAGE_REF"
 ```
 
@@ -137,19 +164,96 @@ pull it.
 ## Railway service configuration
 
 Full walkthrough: [`graphify/docs/railway-setup.md`](graphify/docs/railway-setup.md).
-The non-obvious settings once a service points at the image:
+Four Railway services point at the same image, each with its own
+`SERVICE_ROLE` and its own Variables tab. Both API and worker call
+`get_settings()` at startup, which builds the **same full `Settings` model**
+— so the worker needs every field the API needs, not just `DATABASE_URL` and
+`REDIS_URL`. Set every variable listed below on the service it's under, even
+where the same variable repeats across services with the same value (e.g.
+`SESSION_SECRET` must be identical on both API and worker, but it is a
+separate variable entry on each service — Railway does not share Variables
+across services unless you explicitly reference a Shared Variable).
 
-- **API**: `SERVICE_ROLE=api`, public domain enabled, one Railway volume at
-  `/data/workspaces`, one replica while `WORKSPACE_STORAGE_TYPE=local`.
-- **Worker**: `SERVICE_ROLE=worker`, no public domain, no volume.
-- **Extractor**: leave the Variables tab empty — the worker injects
-  `SERVICE_ROLE=extractor` and run-scoped variables per run.
-  **Settings → Deploy → Restart Policy: `Never`**, or Railway treats a
-  successful exit as a crash and reruns the job forever. No public domain.
-- **Migrate**: one-shot, `SERVICE_ROLE=migrate` + `DATABASE_URL_DIRECT`.
-- API and worker share the pooled Neon URL; only the migrate role gets the
-  direct URL. Neon is the only PostgreSQL provider — never provision a
-  Railway PostgreSQL service.
+### API service
+
+Public domain enabled, one Railway volume at `/data/workspaces`, one replica
+while `WORKSPACE_STORAGE_TYPE=local`.
+
+```
+SERVICE_ROLE=api
+FRONTEND_URL=<your Vercel URL>
+BACKEND_URL=<this API service's own public Railway URL>
+DATABASE_URL=<pooled Neon URL>
+REDIS_URL=${{Redis.REDIS_URL}}
+SESSION_SECRET=<random secret>
+TOKEN_ENCRYPTION_KEY=<random secret>
+GITHUB_APP_ID=<from your GitHub App>
+GITHUB_CLIENT_ID=<from your GitHub App>
+GITHUB_CLIENT_SECRET=<from your GitHub App>
+GITHUB_PRIVATE_KEY=<from your GitHub App — real newlines, not \n>
+GITHUB_WEBHOOK_SECRET=<from your GitHub App>
+RUN_WORKER_ENABLED=false
+WORKSPACE_STORAGE_TYPE=local
+WORKSPACE_STORAGE_DIR=/data/workspaces
+```
+
+### Worker service
+
+No public domain, no volume. Must stay **Active** (a long-running process,
+`while True:` in `run_worker.py`) — if its deployment status ever shows
+"Completed", it has stopped consuming the queue entirely.
+
+```
+SERVICE_ROLE=worker
+FRONTEND_URL=<same value as on the API service>
+BACKEND_URL=<same value as on the API service>
+DATABASE_URL=<same pooled Neon URL as on the API service>
+REDIS_URL=${{Redis.REDIS_URL}}
+SESSION_SECRET=<same value as on the API service>
+TOKEN_ENCRYPTION_KEY=<same value as on the API service>
+GITHUB_APP_ID=<same value as on the API service>
+GITHUB_CLIENT_ID=<same value as on the API service>
+GITHUB_CLIENT_SECRET=<same value as on the API service>
+GITHUB_PRIVATE_KEY=<same value as on the API service — real newlines, not \n>
+GITHUB_WEBHOOK_SECRET=<same value as on the API service>
+RAILWAY_API_TOKEN=<from graphify/.env>
+RAILWAY_PROJECT_ID=<from graphify/.env>
+RAILWAY_SERVICE_ID=<the EXTRACTOR service's ID — not the worker's own>
+RAILWAY_ENVIRONMENT_ID=<from graphify/.env>
+```
+
+Do **not** put `REPO_URL`, `REPO_BRANCH`, `REPO_TOKEN`,
+`GRAPHIFY_CALLBACK_URL`, `GRAPHIFY_CALLBACK_SECRET`, or a provider API key
+(e.g. `OPENAI_API_KEY`) on the worker — those are per-run values the worker
+injects into the extractor's deployment automatically. If they're set
+statically here, the worker runs one extraction directly on itself, exits
+("Completed"), and never processes anything queued after that.
+
+### Extractor service
+
+Leave the Variables tab **completely empty** — the worker injects
+`SERVICE_ROLE=extractor` and every run-scoped variable (`REPO_URL`,
+`REPO_BRANCH`, `REPO_TOKEN`, `GRAPHIFY_CALLBACK_URL`,
+`GRAPHIFY_CALLBACK_SECRET`, the provider API key, `WORKSPACE_STORAGE_TYPE`)
+fresh on every deploy. Anything set statically here becomes a stale fallback
+that can silently override a real run's values.
+
+**Settings → Deploy → Restart Policy: `Never`.** This is a batch job that
+exits when finished; the default restart policy treats a *successful* exit
+as a crash and re-runs the extraction in a loop. No public domain.
+
+### Migration job/service
+
+One-shot, run manually (or as a one-off job) whenever the schema changes:
+
+```
+SERVICE_ROLE=migrate
+DATABASE_URL_DIRECT=<direct, non-pooled Neon URL>
+```
+
+API and worker use the **pooled** Neon URL; only the migrate role gets the
+**direct** URL. Neon is the only PostgreSQL provider — never provision a
+Railway PostgreSQL service.
 
 Debugging a deploy directly via Railway's GraphQL API (faster than the
 dashboard log viewer) is documented in `graphify/CLAUDE.md`.
@@ -201,3 +305,13 @@ NEXT_PUBLIC_API_URL=https://graphify-api-production.up.railway.app
 This must match the API service's actual Railway public domain
 (`BACKEND_URL` in the [Railway service configuration](#railway-service-configuration)
 section above) — the frontend calls this URL directly from the browser.
+
+
+## ENV ADDED TO THE RAILWAY GRAPHIFY_WORKER-SERVICE
+RAILWAY_API_TOKEN=<from graphify/.env>
+RAILWAY_PROJECT_ID=<from graphify/.env>
+RAILWAY_SERVICE_ID=<the graphify-extractor-staging service's ID, NOT the worker's own>
+RAILWAY_ENVIRONMENT_ID=<from graphify/.env>
+One thing to get right: RAILWAY_SERVICE_ID must be the extractor service's ID (the one named graphify-extractor-staging), since that's the service the worker launches deployments into — not the worker's own service ID. You can get it from that service's URL in Railway: https://railway.app/project/<PROJECT_ID>/service/<SERVICE_ID>.
+
+Also worth adding REDIS_URL=${{Redis.REDIS_URL}} if it's not already there (it's not in your 12) — without it the worker falls back to the slower Postgres-polling path, which still works but isn't the intended fast path.
