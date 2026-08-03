@@ -704,6 +704,10 @@
   background: var(--bg-editor);
 }
 
+.editor-pane.explorer-is-collapsed {
+  grid-template-columns: 28px minmax(0, 1fr);
+}
+
 .file-explorer {
   min-width: 0;
   border-right: 1px solid var(--border-subtle);
@@ -715,13 +719,19 @@
   height: 36px;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px;
+  padding: 0 6px 0 10px;
   border-bottom: 1px solid var(--border-subtle);
   color: var(--text-muted);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.file-explorer-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .file-explorer header strong {
@@ -734,6 +744,49 @@
   color: #93c5fd;
   font-family: var(--font-code);
   font-size: 10px;
+}
+
+.file-explorer-header-actions button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.file-explorer-header-actions button:hover {
+  background: rgb(255 255 255 / 8%);
+  color: var(--text-primary);
+}
+
+.file-explorer-header-actions button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.file-explorer-rail {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-panel);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.file-explorer-rail:hover {
+  color: var(--text-primary);
+}
+
+.file-explorer-rail svg {
+  width: 13px;
+  height: 13px;
 }
 
 .file-tree {
@@ -861,12 +914,12 @@
   background: var(--bg-panel);
 }
 
-.editor-tabs > button {
+.editor-tabs > .editor-tab {
   display: inline-flex;
   min-width: 0;
   align-items: center;
   gap: 6px;
-  padding: 0 10px;
+  padding: 0 6px 0 10px;
   border: 0;
   border-right: 1px solid var(--border-subtle);
   background: var(--bg-editor);
@@ -883,11 +936,75 @@
   stroke: none;
 }
 
-.editor-tabs > button i {
+.editor-tabs > .editor-tab i {
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--accent-blue);
+}
+
+.editor-tab-close {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.editor-tab-close:hover {
+  background: rgb(255 255 255 / 10%);
+  color: var(--text-primary);
+}
+
+.editor-tab-close svg {
+  width: 10px;
+  height: 10px;
+}
+
+.editor-tabs-tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+}
+
+.editor-tabs-tools button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.editor-tabs-tools button:hover:not(:disabled) {
+  background: rgb(255 255 255 / 8%);
+  color: var(--text-primary);
+}
+
+.editor-tabs-tools button:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.editor-tabs-tools span {
+  min-width: 30px;
+  color: var(--text-muted);
+  font-family: var(--font-code);
+  font-size: 10px;
+  text-align: center;
 }
 
 .editor-mode-switch {
@@ -1672,6 +1789,10 @@
 
   .editor-pane.is-mobile-active {
     grid-template-columns: 180px minmax(0, 1fr);
+  }
+
+  .editor-pane.is-mobile-active.explorer-is-collapsed {
+    grid-template-columns: 28px minmax(0, 1fr);
   }
 
   .graph-pane.is-mobile-active {

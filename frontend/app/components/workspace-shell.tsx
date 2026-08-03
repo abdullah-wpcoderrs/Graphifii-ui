@@ -14,7 +14,9 @@ import {
 } from "react";
 import { FaPython } from "react-icons/fa6";
 import {
+  VscChevronLeft,
   VscChevronRight,
+  VscClose,
   VscFile,
   VscFolderOpened,
   VscMarkdown,
@@ -48,6 +50,10 @@ import { RerunProjectButton } from "./rerun-project-button";
 import { ErrorState, Spinner } from "./ui";
 
 const MAX_WS_BACKOFF_MS = 15000;
+const MIN_EDITOR_FONT_SIZE = 10;
+const MAX_EDITOR_FONT_SIZE = 24;
+const DEFAULT_EDITOR_FONT_SIZE = 15;
+const EDITOR_FONT_SIZE_KEY = "graphify-editor-font-size";
 
 const MonacoEditor = dynamic(
   () => import("@monaco-editor/react").then((module) => module.Editor),
@@ -183,6 +189,8 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
   const [logFilter, setLogFilter] = useState("all");
   const [leftWidth, setLeftWidth] = useState(35);
   const [rightWidth, setRightWidth] = useState(25);
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false);
+  const [editorFontSize, setEditorFontSize] = useState(DEFAULT_EDITOR_FONT_SIZE);
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileContentError, setFileContentError] = useState<string | null>(null);
   const [fileContentLoading, setFileContentLoading] = useState(false);
@@ -265,8 +273,7 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
 
   const allFiles: WorkspaceFileEntry[] =
     state.status === "ready" ? state.fileGroups.flatMap((group) => group.files) : [];
-  const activeFile =
-    allFiles.find((file) => file.path === activeFilePath) ?? allFiles[0] ?? null;
+  const activeFile = allFiles.find((file) => file.path === activeFilePath) ?? null;
 
   const centerWidth = Math.max(30, 100 - leftWidth - rightWidth);
 
@@ -275,10 +282,17 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
     if (!saved) return;
 
     try {
-      const value = JSON.parse(saved) as { left?: number; right?: number };
+      const value = JSON.parse(saved) as {
+        left?: number;
+        right?: number;
+        explorerCollapsed?: boolean;
+      };
       const frame = window.requestAnimationFrame(() => {
         if (typeof value.left === "number") setLeftWidth(value.left);
         if (typeof value.right === "number") setRightWidth(value.right);
+        if (typeof value.explorerCollapsed === "boolean") {
+          setExplorerCollapsed(value.explorerCollapsed);
+        }
       });
       return () => window.cancelAnimationFrame(frame);
     } catch {
@@ -289,9 +303,27 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
   useEffect(() => {
     window.localStorage.setItem(
       `graphify-pane-widths:${projectId}`,
-      JSON.stringify({ left: leftWidth, right: rightWidth }),
+      JSON.stringify({ left: leftWidth, right: rightWidth, explorerCollapsed }),
     );
-  }, [leftWidth, projectId, rightWidth]);
+  }, [explorerCollapsed, leftWidth, projectId, rightWidth]);
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem(EDITOR_FONT_SIZE_KEY);
+    if (!saved) return;
+    const parsed = Number(saved);
+    if (Number.isFinite(parsed)) {
+      const frame = window.requestAnimationFrame(() => {
+        setEditorFontSize(
+          Math.min(MAX_EDITOR_FONT_SIZE, Math.max(MIN_EDITOR_FONT_SIZE, parsed)),
+        );
+      });
+      return () => window.cancelAnimationFrame(frame);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(EDITOR_FONT_SIZE_KEY, String(editorFontSize));
+  }, [editorFontSize]);
 
   // Real conversation over a real socket: replays history on connect (a
   // refresh must show the real conversation, not an empty panel), and
@@ -487,8 +519,8 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
     () => ({
       automaticLayout: true,
       fontFamily: "'Geist Mono', 'JetBrains Mono', monospace",
-      fontSize: 15,
-      lineHeight: 23,
+      fontSize: editorFontSize,
+      lineHeight: Math.round(editorFontSize * 1.55),
       minimap: { enabled: false },
       padding: { top: 14 },
       readOnly: true,
@@ -497,13 +529,26 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
       smoothScrolling: true,
       wordWrap: "on" as const,
     }),
-    [],
+    [editorFontSize],
   );
 
   function openFile(path: string) {
     setActiveFilePath(path);
     setActivePanel("editor");
     setSelectedNode((current) => (current?.filePath === path ? current : null));
+  }
+
+  function closeActiveFile() {
+    setActiveFilePath(null);
+    setSelectedNode(null);
+  }
+
+  function increaseEditorFontSize() {
+    setEditorFontSize((size) => Math.min(MAX_EDITOR_FONT_SIZE, size + 1));
+  }
+
+  function decreaseEditorFontSize() {
+    setEditorFontSize((size) => Math.max(MIN_EDITOR_FONT_SIZE, size - 1));
   }
 
   function handleGraphNode(node: WorkspaceGraphNode) {
@@ -671,13 +716,32 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
         <section
           className={`workspace-pane editor-pane ${
             activePanel === "editor" ? "is-mobile-active" : ""
-          }`}
+          } ${explorerCollapsed ? "explorer-is-collapsed" : ""}`}
           aria-label="Code editor"
         >
+          {explorerCollapsed ? (
+            <button
+              className="file-explorer-rail"
+              type="button"
+              aria-label="Show file explorer"
+              onClick={() => setExplorerCollapsed(false)}
+            >
+              <VscChevronRight aria-hidden="true" />
+            </button>
+          ) : (
           <aside className="file-explorer">
             <header>
               <span>Explorer</span>
-              <strong>{state.totalFiles}</strong>
+              <div className="file-explorer-header-actions">
+                <strong>{state.totalFiles}</strong>
+                <button
+                  type="button"
+                  aria-label="Hide file explorer"
+                  onClick={() => setExplorerCollapsed(true)}
+                >
+                  <VscChevronLeft aria-hidden="true" />
+                </button>
+              </div>
             </header>
             <div className="file-tree">
               {state.fileGroups.length === 0 ? (
@@ -712,17 +776,45 @@ export function WorkspaceShell({ projectId }: WorkspaceShellProps) {
               )}
             </div>
           </aside>
+          )}
 
           <div className="editor-workbench">
             <div className="editor-tabs">
               {activeFile ? (
-                <button className="is-active" type="button">
+                <div className="editor-tab is-active">
                   <FileTypeIcon language={activeFile.language} />
-                  {activeFile.name}
-                </button>
+                  <span>{activeFile.name}</span>
+                  <button
+                    className="editor-tab-close"
+                    type="button"
+                    aria-label={`Close ${activeFile.name}`}
+                    onClick={closeActiveFile}
+                  >
+                    <VscClose aria-hidden="true" />
+                  </button>
+                </div>
               ) : (
                 <span className="editor-tabs-empty">No file selected</span>
               )}
+              <div className="editor-tabs-tools" aria-label="Editor font size">
+                <button
+                  type="button"
+                  aria-label="Decrease font size"
+                  disabled={editorFontSize <= MIN_EDITOR_FONT_SIZE}
+                  onClick={decreaseEditorFontSize}
+                >
+                  A-
+                </button>
+                <span>{editorFontSize}px</span>
+                <button
+                  type="button"
+                  aria-label="Increase font size"
+                  disabled={editorFontSize >= MAX_EDITOR_FONT_SIZE}
+                  onClick={increaseEditorFontSize}
+                >
+                  A+
+                </button>
+              </div>
             </div>
 
             <div className="editor-surface">
