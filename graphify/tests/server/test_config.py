@@ -64,6 +64,60 @@ def test_admin_auth_configured_false_when_unset():
     assert settings.admin_auth_configured is False
 
 
+# --------------------------------------------------------------------------
+# BACKEND_URL must be able to carry a session cookie
+# --------------------------------------------------------------------------
+#
+# is_secure_cookie() reads BACKEND_URL, not the request scheme, so this value
+# decides whether every session cookie gets Secure/SameSite=None. A cross-site
+# deployment left on http:// therefore issues cookies the browser drops:
+# POST /api/admin/login returns 200 and the /api/admin/me right after it
+# returns 401, with nothing in the response that looks like a config error.
+# These pin the boundary between "obviously broken" and "unusual but works".
+
+
+def test_cross_site_http_backend_url_is_rejected():
+    with pytest.raises(ValidationError, match="BACKEND_URL"):
+        _settings(
+            frontend_url="https://app.vercel.app",
+            backend_url="http://api.up.railway.app",
+        )
+
+
+def test_cross_site_https_backend_url_is_accepted():
+    settings = _settings(
+        frontend_url="https://app.vercel.app",
+        backend_url="https://api.up.railway.app",
+    )
+    assert settings.backend_url == "https://api.up.railway.app"
+
+
+@pytest.mark.parametrize(
+    "frontend_url, backend_url",
+    [
+        ("http://localhost:3000", "http://localhost:8000"),
+        ("http://127.0.0.1:3000", "http://127.0.0.1:8000"),
+        # Browsers treat *.localhost as a secure context too.
+        ("http://app.localhost:3000", "http://api.localhost:8000"),
+    ],
+)
+def test_loopback_http_development_is_still_allowed(frontend_url, backend_url):
+    # The documented local setup (graphify/CLAUDE.md) requires BACKEND_URL to
+    # stay http://localhost:8000 — OAuth redirect URIs are registered against
+    # it. This check must never make that configuration unstartable.
+    assert _settings(frontend_url=frontend_url, backend_url=backend_url)
+
+
+def test_same_site_http_deployment_is_allowed():
+    # Both halves on one non-loopback host over plain HTTP is unglamorous but
+    # genuinely works: a same-site cookie needs neither Secure nor
+    # SameSite=None, and Lax carries it. Only the cross-site case is fatal.
+    assert _settings(
+        frontend_url="http://box.lan:3000",
+        backend_url="http://box.lan:8000",
+    )
+
+
 def test_railway_configured_requires_all_four_values():
     partial = _settings(railway_api_token="tok", railway_project_id="proj")
     assert partial.railway_configured is False

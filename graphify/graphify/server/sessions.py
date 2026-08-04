@@ -57,6 +57,19 @@ def generate_oauth_state() -> str:
 
 
 def is_secure_cookie() -> bool:
+    """Whether session cookies get the `Secure` flag.
+
+    Read from configuration rather than the request scheme because a request
+    arriving at a container behind a proxy is plain HTTP even when the browser
+    spoke HTTPS, so `request.url.scheme` would understate it and drop the flag
+    on every production cookie.
+
+    That makes BACKEND_URL load-bearing: an http:// value on a real deployment
+    would silently issue cookies the browser discards. `Settings`'
+    `_cookies_must_be_deliverable` validator rejects exactly that combination
+    at startup, so by the time this runs the value is either https:// or a
+    loopback address.
+    """
     return get_settings().backend_url.startswith("https://")
 
 

@@ -28,7 +28,17 @@ export async function adminLogin(email: string, password: string): Promise<Admin
   await apiPost<{ ok: true; email: string }>("/api/admin/login", { email, password });
   const session = await fetchAdminSession();
   if (!session) {
-    throw new ApiError("Login succeeded but the admin session could not be read.", 0, "unknown");
+    // The credentials were accepted (the POST above did not throw) but the
+    // very next request came back unauthenticated — the browser never stored
+    // or never returned the cookie. In production that means the backend
+    // issued it without `Secure`/`SameSite=None` across the frontend/API site
+    // boundary; see graphify/server/sessions.py's is_secure_cookie(). Its own
+    // code so the UI can say that instead of blaming the password.
+    throw new ApiError(
+      "Signed in, but the session cookie was rejected by your browser.",
+      0,
+      "session_not_persisted",
+    );
   }
   return session;
 }
