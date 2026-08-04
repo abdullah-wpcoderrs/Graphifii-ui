@@ -954,6 +954,13 @@ button {
   gap: 13px;
 }
 
+/* Dashboard's identity block has no subtitle/tags under the name (unlike
+   Repositories', which needs flex-start to keep the mark aligned with a
+   taller multi-line block) — center the mark against the single line. */
+.repository-identity-single-line {
+  align-items: center;
+}
+
 .repository-identity > div:last-child {
   min-width: 0;
 }
@@ -1104,9 +1111,9 @@ button {
 }
 
 .repository-state {
-  display: grid;
-  grid-template-columns: minmax(96px, 1fr) auto;
+  display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 14px;
 }
 
@@ -1252,6 +1259,100 @@ button.repository-action:disabled {
   color: var(--danger);
   font-size: 9px;
   text-align: right;
+}
+
+/* Icon-only row actions (dashboard table) with a hover/focus tooltip. */
+.icon-action {
+  position: relative;
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-focus);
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.icon-action svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.4;
+}
+
+.icon-action:hover {
+  border-color: #52525b;
+  background: #202024;
+}
+
+.icon-action:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.icon-action.is-retry {
+  border-color: rgb(248 113 113 / 32%);
+  color: #fca5a5;
+}
+
+.icon-action.is-rerun {
+  border-color: rgb(59 130 246 / 35%);
+  color: #93c5fd;
+}
+
+.icon-action.is-rerun:hover {
+  border-color: rgb(59 130 246 / 62%);
+  background: rgb(59 130 246 / 8%);
+}
+
+[data-tooltip] {
+  position: relative;
+}
+
+[data-tooltip]::after {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 20;
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 5px;
+  background: #1a1a1e;
+  color: var(--text-primary);
+  content: attr(data-tooltip);
+  font-family: var(--font-code);
+  font-size: 9px;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(2px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+[data-tooltip]:hover::after,
+[data-tooltip]:focus-visible::after {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.repository-state-badge[data-tooltip] svg {
+  width: 10px;
+  height: 10px;
+  margin-right: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
 }
 
 .dashboard-no-results {
@@ -1501,6 +1602,22 @@ button.repository-action:disabled {
 
   .rerun-project-action {
     align-items: stretch;
+  }
+
+  /* Dashboard's action column is icon buttons (34px, fixed), not the wide
+     text buttons above — plenty of room to stay on one row at this
+     breakpoint, so undo the text-button stacking for it specifically. */
+  .repository-state-inline {
+    display: flex;
+    flex-direction: row;
+    justify-content: flex-end;
+    gap: 14px;
+  }
+
+  .repository-action-cluster-icons {
+    width: auto;
+    flex-direction: row;
+    align-items: center;
   }
 }
 
@@ -3082,6 +3199,10 @@ button.repository-action:disabled {
   max-width: 960px;
   margin: 0 auto;
   padding: 48px 32px;
+}
+
+.page-content-wide {
+  max-width: 1280px;
 }
 
 .page-content-centered {

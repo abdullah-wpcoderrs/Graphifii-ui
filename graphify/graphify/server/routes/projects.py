@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from graphify.server.db import get_db
-from graphify.server.models import Project, User
+from graphify.server.models import Project, ProjectStatus, User
 from graphify.server.repo_api import (
     RepoAuthError,
     RepoError,
@@ -35,6 +35,24 @@ router = APIRouter(prefix="/api", tags=["projects"])
 _FETCH_TIMEOUT = 10.0
 
 
+def _workspace_missing(project: Project) -> bool:
+    """True when a READY project's local artifact has been lost.
+
+    Only meaningful for local storage: graph_json_url is a filesystem path
+    there (see module docstring), and that path lives on the API service's
+    disk, which is not guaranteed to survive a redeploy (no volume is
+    currently attached — see docs/unified-railway-platform-plan.md's
+    "Attach one Railway volume" item). An http(s) URL is left unchecked
+    here — a network call per row in a list endpoint isn't worth it, and a
+    future object-storage backend is expected to actually be durable.
+    """
+    if project.status != ProjectStatus.READY or not project.graph_json_url:
+        return False
+    if project.graph_json_url.startswith(("http://", "https://")):
+        return False
+    return not Path(project.graph_json_url).is_file()
+
+
 def _serialize(project: Project) -> dict:
     return {
         "id": str(project.id),
@@ -45,6 +63,7 @@ def _serialize(project: Project) -> dict:
         "status": project.status.value,
         "graph_json_url": project.graph_json_url,
         "graph_html_url": project.graph_html_url,
+        "workspace_missing": _workspace_missing(project),
         "created_at": project.created_at.isoformat(),
         "updated_at": project.updated_at.isoformat(),
     }
