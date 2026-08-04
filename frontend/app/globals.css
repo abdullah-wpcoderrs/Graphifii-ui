@@ -800,7 +800,13 @@ button {
 
 .dashboard-filters {
   display: grid;
-  grid-template-columns: minmax(250px, 1fr) 180px 170px auto auto;
+  /* The last two tracks hold the "Apply filters" button and "Clear" link.
+     Bare `auto` lets grid shrink a track below its content's natural width
+     when space is tight, which wrapped the button's label onto two lines
+     inside its fixed 38px-tall pill — the text overflowed the box instead of
+     the box growing. minmax(max-content, auto) floors each track at its
+     content's width so the label can never be squeezed. */
+  grid-template-columns: minmax(250px, 1fr) 180px 170px minmax(max-content, auto) minmax(max-content, auto);
   align-items: end;
   gap: 10px;
   margin-top: 38px;
@@ -878,6 +884,7 @@ button {
   color: #06110d;
   font-size: 11px;
   font-weight: 650;
+  white-space: nowrap;
   cursor: pointer;
 }
 
@@ -1497,6 +1504,27 @@ button.repository-action:disabled {
   }
 }
 
+/* .dashboard-filters alone gets its own, wider breakpoint. The 5-column
+   base layout (minmax(250px,1fr) 180px 170px auto auto) needs ~1090-1110px
+   of *content* width, not viewport width — with the sidebar expanded
+   (~200px), that crossover lands well inside ordinary laptop window sizes,
+   long before the 860px breakpoint below (measured for the sidebar-
+   collapsed case) would ever kick in. Below that point the row must
+   collapse to two columns, or the button/link tracks get shoved outside
+   the visible area with no wrap and no scroll affordance the user can see
+   (grid can't make a track wrap onto a new row; only flex/its own
+   grid-template-columns change can). 1180px leaves margin for scrollbar
+   width and OS/zoom differences above the measured ~1090px danger zone. */
+@media (max-width: 1180px) {
+  .dashboard-filters {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .dashboard-search {
+    grid-column: 1 / -1;
+  }
+}
+
 @media (max-width: 860px) {
   .onboarding-layout {
     width: 100%;
@@ -1526,14 +1554,6 @@ button.repository-action:disabled {
   .dashboard-heading {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .dashboard-filters {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .dashboard-search {
-    grid-column: 1 / -1;
   }
 
   .repository-list-header {
