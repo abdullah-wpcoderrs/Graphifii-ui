@@ -1111,10 +1111,25 @@ button {
 }
 
 .repository-state {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) auto;
   align-items: center;
+  gap: 14px;
+}
+
+/* Dashboard's row uses icon buttons (34px, fixed), not the wide text
+   buttons other pages (e.g. Repositories) use — no need to ever stack
+   these, so keep this row flex at every width, overriding the grid above. */
+.repository-state-inline {
+  display: flex;
   justify-content: flex-end;
   gap: 14px;
+}
+
+.repository-action-cluster-icons {
+  flex-direction: row;
+  width: auto;
+  align-items: center;
 }
 
 .repository-state-badge {
@@ -1602,22 +1617,6 @@ button.repository-action:disabled {
 
   .rerun-project-action {
     align-items: stretch;
-  }
-
-  /* Dashboard's action column is icon buttons (34px, fixed), not the wide
-     text buttons above — plenty of room to stay on one row at this
-     breakpoint, so undo the text-button stacking for it specifically. */
-  .repository-state-inline {
-    display: flex;
-    flex-direction: row;
-    justify-content: flex-end;
-    gap: 14px;
-  }
-
-  .repository-action-cluster-icons {
-    width: auto;
-    flex-direction: row;
-    align-items: center;
   }
 }
 
