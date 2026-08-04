@@ -27,13 +27,19 @@ def _is_loopback(url: str) -> bool:
     return host in _LOOPBACK_HOSTS or host.endswith(".localhost")
 
 
-def _same_site(a: str, b: str) -> bool:
-    """Whether two URLs are same-site for cookie purposes.
+def _same_host(a: str, b: str) -> bool:
+    """Whether two URLs share an exact hostname — NOT real cookie same-site.
 
-    Deliberately compares hostnames rather than doing real eTLD+1 registrable
-    -domain math: getting that right needs the public suffix list, and the only
-    question here is whether a deployment obviously needs SameSite=None. A
-    false "cross-site" answer just means the stricter check applies.
+    Real "same-site" is scheme + eTLD+1 (registrable domain), which needs the
+    public suffix list to compute correctly: a naive "last two labels"
+    approximation would call `app.vercel.app` and `api.vercel.app` same-site,
+    when `vercel.app` is itself a public suffix and those are two unrelated,
+    genuinely cross-site deployments — exactly the broken case this validator
+    exists to catch. Hostname equality is deliberately stricter than the real
+    rule: it can false-negative on a legitimate same-registrable-domain
+    sibling-subdomain deployment (`app.box.lan` + `api.box.lan`), forcing that
+    case onto https or a loopback host too. It can never false-positive a
+    cross-site pair into passing, which is the failure mode that matters here.
     """
     return (urlsplit(a).hostname or "") == (urlsplit(b).hostname or "")
 
@@ -330,7 +336,7 @@ class Settings(BaseSettings):
         # say) is unglamorous but genuinely works: the cookie needs neither
         # Secure nor SameSite=None, and Lax carries it. Only the cross-site
         # combination is unconditionally broken, so only that one is fatal.
-        if _same_site(self.frontend_url, self.backend_url):
+        if _same_host(self.frontend_url, self.backend_url):
             return self
 
         raise ValueError(
@@ -340,7 +346,10 @@ class Settings(BaseSettings):
             "SameSite=None, and browsers only accept SameSite=None together with Secure, "
             "which requires https. Set BACKEND_URL to the API's real public https:// origin "
             "(the value a browser sees, not Railway's internal *.railway.internal hostname). "
-            "For local development it must stay http://localhost:8000."
+            "For local development it must stay http://localhost:8000. Sibling subdomains on "
+            "one registrable domain (e.g. app.example.lan + api.example.lan) are also blocked "
+            "here even though they'd work in a real browser — this check only recognizes an "
+            "exact hostname match, not eTLD+1; use https:// or a loopback host to unblock that."
         )
 
     @property

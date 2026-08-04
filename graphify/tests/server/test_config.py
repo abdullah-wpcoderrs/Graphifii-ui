@@ -108,7 +108,7 @@ def test_loopback_http_development_is_still_allowed(frontend_url, backend_url):
     assert _settings(frontend_url=frontend_url, backend_url=backend_url)
 
 
-def test_same_site_http_deployment_is_allowed():
+def test_same_host_http_deployment_is_allowed():
     # Both halves on one non-loopback host over plain HTTP is unglamorous but
     # genuinely works: a same-site cookie needs neither Secure nor
     # SameSite=None, and Lax carries it. Only the cross-site case is fatal.
@@ -116,6 +116,24 @@ def test_same_site_http_deployment_is_allowed():
         frontend_url="http://box.lan:3000",
         backend_url="http://box.lan:8000",
     )
+
+
+def test_sibling_subdomain_http_deployment_is_a_documented_false_negative():
+    # config._same_host() is exact hostname equality, not real eTLD+1
+    # same-site — deliberately, since a naive "last two labels" heuristic
+    # would call app.vercel.app and api.vercel.app same-site even though
+    # vercel.app is a public suffix and those are genuinely different sites.
+    # The cost is this: app.example.lan and api.example.lan share a
+    # registrable domain and would work fine as SameSite=Lax cookies in a
+    # real browser, but this check still rejects them because the hostnames
+    # differ. Pinned here as a known, accepted limitation — not a bug to fix
+    # silently — so a future eTLD+1 implementation is a deliberate choice,
+    # not an accidental behavior change.
+    with pytest.raises(ValidationError, match="BACKEND_URL"):
+        _settings(
+            frontend_url="http://app.example.lan:3000",
+            backend_url="http://api.example.lan:8000",
+        )
 
 
 def test_railway_configured_requires_all_four_values():
