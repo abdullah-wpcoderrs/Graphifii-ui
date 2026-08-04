@@ -337,6 +337,38 @@ Confirm the role in each service log:
 [platform] starting role=migrate
 ```
 
+### Step F — Set the login-critical variables on the API service
+
+On Railway, on the API service, set these 4 things:
+
+| Set this | To this | Why |
+| --- | --- | --- |
+| `BACKEND_URL` | Your API's real web address, starting with `https://` (e.g. `https://graphify-api.up.railway.app`) — **not** the internal Railway hostname | This is what tells the login cookie "you're allowed to travel between sites." Get it wrong and login silently fails. |
+| `FRONTEND_URL` | Your frontend's exact web address, starting with `https://` (e.g. `https://graphify.vercel.app`) | This is the "guest list" — only requests from this exact address are allowed in. |
+| `ADMIN_SESSION_SECRET` | A random secret you generate once | Without it, admin login is switched off entirely. |
+| `SESSION_SECRET` | A different random secret (already probably set — just make sure it's not the same as the one above) | Keeps admin logins and regular user logins from being mixed up. |
+
+**How to generate the random secrets** — run this twice (once for each secret) in any terminal:
+
+```bash
+openssl rand -base64 48
+```
+
+Paste one result into `ADMIN_SESSION_SECRET`, the other into `SESSION_SECRET`. They must be different from each other.
+
+**Where to enter these on Railway** — API service → **Settings** → **Variables** tab → add each one as a key/value pair.
+
+**After setting them:**
+
+1. Redeploy the API service (Railway usually does this automatically when you save a variable).
+2. Create the admin account against the real production database by running, on your own computer:
+   ```bash
+   DATABASE_URL='<production URL>' ADMIN_EMAIL='you@example.com' ADMIN_PASSWORD='<12+ chars>' uv run python scripts/seed_admin.py
+   ```
+3. Try logging in on the real site.
+
+Vercel preview deployments each get their own web address, so they will not match `FRONTEND_URL` and cannot log in against production. That's expected — point previews at a separate backend environment if they need to authenticate.
+
 ---
 
 ## What the backend sends the job

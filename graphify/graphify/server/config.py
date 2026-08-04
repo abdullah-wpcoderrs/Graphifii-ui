@@ -8,12 +8,40 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # graphify/server/config.py -> graphify/server -> graphify (package) -> graphify (repo root)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# Hosts where plain HTTP is legitimate. Browsers grant these "secure context"
+# status despite the scheme, which is precisely why local development works
+# without TLS — and why the same non-https value is a real defect anywhere else.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1", "0.0.0.0"})
+
+
+def _is_loopback(url: str) -> bool:
+    host = urlsplit(url).hostname or ""
+    return host in _LOOPBACK_HOSTS or host.endswith(".localhost")
+
+
+def _same_host(a: str, b: str) -> bool:
+    """Whether two URLs share an exact hostname — NOT real cookie same-site.
+
+    Real "same-site" is scheme + eTLD+1 (registrable domain), which needs the
+    public suffix list to compute correctly: a naive "last two labels"
+    approximation would call `app.vercel.app` and `api.vercel.app` same-site,
+    when `vercel.app` is itself a public suffix and those are two unrelated,
+    genuinely cross-site deployments — exactly the broken case this validator
+    exists to catch. Hostname equality is deliberately stricter than the real
+    rule: it can false-negative on a legitimate same-registrable-domain
+    sibling-subdomain deployment (`app.box.lan` + `api.box.lan`), forcing that
+    case onto https or a loopback host too. It can never false-positive a
+    cross-site pair into passing, which is the failure mode that matters here.
+    """
+    return (urlsplit(a).hostname or "") == (urlsplit(b).hostname or "")
 
 
 def normalize_database_url(value: str) -> str:
@@ -276,6 +304,53 @@ class Settings(BaseSettings):
                 "reusing one defeats the admin/user session isolation"
             )
         return self
+
+    @model_validator(mode="after")
+    def _cookies_must_be_deliverable(self) -> "Settings":
+        """Reject a BACKEND_URL that would issue cookies the browser discards.
+
+        `sessions.is_secure_cookie()` derives the cookie's `Secure` flag — and
+        through it `SameSite` — from this setting rather than from the incoming
+        request's scheme. That is fine when BACKEND_URL is accurate and
+        silently catastrophic when it is not: a deployment where the frontend
+        and API are different sites (Vercel + Railway) but BACKEND_URL is still
+        `http://...` issues every session cookie as `Secure=false;
+        SameSite=Lax`, which the browser then refuses to send back on the
+        cross-site fetch that immediately follows.
+
+        Nothing about that failure looks like a configuration error from the
+        outside. `POST /api/admin/login` returns 200, the very next
+        `/api/admin/me` returns 401, and the frontend bounces between the login
+        page and the dashboard forever. Failing at startup, where the message
+        can name the variable, is worth more than any amount of later
+        debugging.
+
+        Loopback hosts are exempt: browsers treat `http://localhost` as a
+        secure context, frontend and backend are same-site there, and
+        `session_cookie_samesite()` already falls back to `Lax` for it.
+        """
+        if self.backend_url.startswith("https://") or _is_loopback(self.backend_url):
+            return self
+
+        # Plain HTTP on a same-site deployment (a LAN host serving both halves,
+        # say) is unglamorous but genuinely works: the cookie needs neither
+        # Secure nor SameSite=None, and Lax carries it. Only the cross-site
+        # combination is unconditionally broken, so only that one is fatal.
+        if _same_host(self.frontend_url, self.backend_url):
+            return self
+
+        raise ValueError(
+            f"BACKEND_URL is {self.backend_url!r} — plain http:// on a host that is not "
+            f"loopback, while FRONTEND_URL ({self.frontend_url!r}) is a different site. "
+            "Cookie-based login cannot work in that combination: cross-site cookies need "
+            "SameSite=None, and browsers only accept SameSite=None together with Secure, "
+            "which requires https. Set BACKEND_URL to the API's real public https:// origin "
+            "(the value a browser sees, not Railway's internal *.railway.internal hostname). "
+            "For local development it must stay http://localhost:8000. Sibling subdomains on "
+            "one registrable domain (e.g. app.example.lan + api.example.lan) are also blocked "
+            "here even though they'd work in a real browser — this check only recognizes an "
+            "exact hostname match, not eTLD+1; use https:// or a loopback host to unblock that."
+        )
 
     @property
     def gitlab_configured(self) -> bool:

@@ -81,15 +81,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Graphify Cloud IDE API", lifespan=lifespan)
 
-# Credentialed CORS requires an explicit origin — never "*" — per
-# docs/github-app-setup.md and frontend/docs/local-development.md.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[settings.frontend_url],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ORDER MATTERS, and it is the reverse of how it reads. `add_middleware`
+# inserts at the front of the stack, so the LAST one added is the OUTERMOST
+# one — it sees the request first and the response last. CORS is added last so
+# that it wraps CSRFOriginMiddleware and every response leaves through it,
+# including ones an inner middleware short-circuits.
+#
+# What this does NOT fix, deliberately noted so nobody re-derives it: a CSRF
+# rejection still reaches the browser without Access-Control-Allow-Origin, and
+# so still surfaces as an opaque network error rather than a readable 403.
+# That is not an ordering artifact — CORSMiddleware only emits the header for
+# origins on its allowlist, and CSRFOriginMiddleware rejects exactly the
+# origins CORS already refuses, since both are built from settings.frontend_url.
+# The header is absent because the origin is untrusted, which is correct. If a
+# legitimate frontend is getting these, the bug is that FRONTEND_URL does not
+# match the origin users are actually on (www vs apex, custom domain vs
+# *.vercel.app, a preview deployment) — fix the value, not this stack.
 
 # CORS does not prevent CSRF — it restricts which origins can *read* a
 # response, not which origins can *send* a request. Cookie-only auth with
@@ -99,6 +106,16 @@ app.add_middleware(
     CSRFOriginMiddleware,
     frontend_url=settings.frontend_url,
     cookie_names=frozenset({SESSION_COOKIE_NAME, ADMIN_SESSION_COOKIE_NAME}),
+)
+
+# Credentialed CORS requires an explicit origin — never "*" — per
+# docs/github-app-setup.md and frontend/docs/local-development.md.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[settings.frontend_url],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(auth_router)
