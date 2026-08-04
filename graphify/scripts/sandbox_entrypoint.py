@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -147,6 +148,16 @@ def clone() -> None:
     token = os.environ.get("REPO_TOKEN")
     branch = os.environ.get("REPO_BRANCH")
 
+    # A restarted container (e.g. after a failed upload) can reuse a
+    # filesystem that still holds the previous attempt's checkout. `git
+    # clone` refuses to write into a non-empty directory, so clear it first
+    # rather than letting the retry fail on a stale leftover.
+    if WORKSPACE.exists():
+        for child in WORKSPACE.iterdir():
+            if child.is_dir() and not child.is_symlink():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
     WORKSPACE.mkdir(parents=True, exist_ok=True)
 
     command = ["git", "clone", "--depth", "1", "--single-branch"]
@@ -269,7 +280,15 @@ def build_files_json() -> dict:
 
 def upload(graph_path: Path, files_path: Path) -> None:
     """Multipart upload of both artifacts, hand-rolled to keep the image
-    dependency-free (no requests/httpx needed just for one POST)."""
+    dependency-free (no requests/httpx needed just for one POST).
+
+    The graph is already fully built and valid on disk by the time this
+    runs — a transient network/edge hiccup on this one POST must not throw
+    away an otherwise-successful extraction, so this retries like report()
+    does. The same X-Sandbox-Event-Id is reused across attempts so a retry
+    that actually landed server-side (but whose response we missed) is
+    deduplicated rather than double-processed.
+    """
     url = os.environ["GRAPHIFY_CALLBACK_URL"].replace("/status", "/artifacts")
     secret = os.environ["GRAPHIFY_CALLBACK_SECRET"]
 
@@ -287,18 +306,41 @@ def upload(graph_path: Path, files_path: Path) -> None:
         body += b"\r\n"
     body += f"--{boundary}--\r\n".encode()
 
-    request = urllib.request.Request(
-        url,
-        data=bytes(body),
-        headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
-            "X-Sandbox-Secret": secret,
-            "X-Sandbox-Event-Id": str(uuid.uuid4()),
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=300) as response:
-        log(f"artifacts uploaded: {response.read().decode()[:200]}")
+    event_id = str(uuid.uuid4())
+    last_error: Exception | None = None
+    for attempt in range(3):
+        request = urllib.request.Request(
+            url,
+            data=bytes(body),
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+                "X-Sandbox-Secret": secret,
+                "X-Sandbox-Event-Id": event_id,
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=300) as response:
+                log(f"artifacts uploaded: {response.read().decode()[:200]}")
+                return
+        except urllib.error.HTTPError as exc:
+            # str(exc) is just the generic HTTP reason phrase ("Internal
+            # Server Error"), not the response body — read the body here or
+            # the real cause is lost.
+            try:
+                detail = exc.read().decode(errors="replace")[:500]
+            except Exception:  # noqa: BLE001 - body may already be consumed/closed
+                detail = "<no response body>"
+            log(f"artifacts upload attempt {attempt + 1}/3 failed: {exc} — {detail}")
+            last_error = exc
+        except Exception as exc:  # noqa: BLE001 - network errors, timeouts, etc.
+            log(f"artifacts upload attempt {attempt + 1}/3 failed: {exc}")
+            last_error = exc
+        if attempt < 2:
+            time.sleep(2**attempt)
+
+    assert last_error is not None
+    raise last_error
 
 
 def main() -> int:

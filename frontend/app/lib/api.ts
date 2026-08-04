@@ -11,6 +11,7 @@ export type Project = {
   status: ProjectStatus;
   graph_json_url: string | null;
   graph_html_url: string | null;
+  workspace_missing: boolean;
   created_at: string;
   updated_at: string;
 };

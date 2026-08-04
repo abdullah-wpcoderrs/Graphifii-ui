@@ -11,15 +11,109 @@ import { ErrorState, Spinner } from "./ui";
 
 type ScreenView = "loading" | "empty" | "error" | "list";
 
+function ResumeIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <path d="M7 4h9v9" />
+      <path d="M16 4 8.5 11.5" />
+      <path d="M12 8v7a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1h4" />
+    </svg>
+  );
+}
+
+function RerunIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <path d="M15.5 6.5A6 6 0 0 0 4.6 8" />
+      <path d="M4.5 13.5A6 6 0 0 0 15.4 12" />
+      <path d="M4 4.5v3.5h3.5" />
+      <path d="M16 15.5V12h-3.5" />
+    </svg>
+  );
+}
+
+function ViewProgressIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <circle cx="10" cy="10" r="6.5" />
+      <path d="M10 6.5V10l2.5 1.5" />
+    </svg>
+  );
+}
+
+function WorkspaceMissingIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <path d="M10 3.5 17 15.5H3z" />
+      <path d="M10 8v3.5" />
+      <circle cx="10" cy="13.6" r="0.4" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+type IconActionProps = {
+  tooltip: string;
+  className?: string;
+  href?: string;
+  onClick?: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+};
+
+function IconAction({ tooltip, className = "", href, onClick, disabled, children }: IconActionProps) {
+  const classes = `icon-action ${className}`.trim();
+
+  if (href) {
+    return (
+      <Link className={classes} href={href} aria-label={tooltip} data-tooltip={tooltip}>
+        {children}
+      </Link>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      className={classes}
+      aria-label={tooltip}
+      data-tooltip={tooltip}
+      onClick={onClick}
+      disabled={disabled}
+    >
+      {children}
+    </button>
+  );
+}
+
 function ProjectAction({ project }: { project: DashboardProject }) {
+  if (project.status === "READY" && project.workspaceMissing) {
+    return (
+      <RerunProjectButton
+        className="icon-action is-rerun"
+        label=""
+        renderIcon
+        tooltip="Workspace files were lost — rerun extraction"
+        project={{
+          repoFullName: project.repoFullName,
+          repoUrl: project.repoUrl,
+          provider: project.provider,
+          defaultBranch: project.defaultBranch,
+        }}
+      />
+    );
+  }
+
   if (project.status === "READY") {
     return (
-      <div className="repository-action-cluster">
-        <Link className="repository-action" href={`/workspace/${project.id}`}>
-          Resume Workspace
-        </Link>
+      <div className="repository-action-cluster repository-action-cluster-icons">
+        <IconAction tooltip="Resume workspace" href={`/workspace/${project.id}`}>
+          <ResumeIcon />
+        </IconAction>
         <RerunProjectButton
-          className="repository-action is-rerun"
+          className="icon-action is-rerun"
+          label=""
+          renderIcon
+          tooltip="Rerun extraction"
           project={{
             repoFullName: project.repoFullName,
             repoUrl: project.repoUrl,
@@ -33,23 +127,25 @@ function ProjectAction({ project }: { project: DashboardProject }) {
 
   if (project.status === "FAILED") {
     return (
-      <Link className="repository-action is-retry" href={`/projects/${project.id}/launch`}>
-        Retry
-      </Link>
+      <IconAction tooltip="Retry" className="is-retry" href={`/projects/${project.id}/launch`}>
+        <RerunIcon />
+      </IconAction>
     );
   }
 
   return (
-    <Link className="repository-action" href={`/projects/${project.id}/launch`}>
-      View Progress
-    </Link>
+    <IconAction tooltip="View progress" href={`/projects/${project.id}/launch`}>
+      <ViewProgressIcon />
+    </IconAction>
   );
 }
 
 function ProjectRow({ project }: { project: DashboardProject }) {
+  const showWorkspaceMissing = project.status === "READY" && project.workspaceMissing;
+
   return (
     <article className="repository-row">
-      <div className="repository-identity">
+      <div className="repository-identity repository-identity-single-line">
         <div className="repository-mark" aria-hidden="true">
           <span />
           <span />
@@ -70,11 +166,21 @@ function ProjectRow({ project }: { project: DashboardProject }) {
         </div>
       </dl>
 
-      <div className="repository-state">
-        <span className={`repository-state-badge is-${statusTone(project.status)}`}>
-          <i aria-hidden="true" />
-          {statusLabel(project.status)}
-        </span>
+      <div className="repository-state repository-state-inline">
+        {showWorkspaceMissing ? (
+          <span
+            className="repository-state-badge is-failed"
+            data-tooltip="The workspace data for this project was lost and needs to be re-extracted"
+          >
+            <WorkspaceMissingIcon />
+            Workspace lost
+          </span>
+        ) : (
+          <span className={`repository-state-badge is-${statusTone(project.status)}`}>
+            <i aria-hidden="true" />
+            {statusLabel(project.status)}
+          </span>
+        )}
         <ProjectAction project={project} />
       </div>
     </article>
@@ -145,7 +251,7 @@ export function DashboardScreen() {
   }
 
   return (
-    <div className="page-content">
+    <div className="page-content page-content-wide">
       <header className="page-header">
         <h1>Dashboard</h1>
         <p>Your most recently graphed projects, newest first.</p>

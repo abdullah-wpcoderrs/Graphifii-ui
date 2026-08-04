@@ -10,6 +10,7 @@ export type DashboardProject = {
   provider: Project["provider"];
   defaultBranch: string;
   status: ProjectStatus;
+  workspaceMissing: boolean;
   updatedLabel: string;
 };
 
@@ -48,6 +49,7 @@ export function mapProject(project: Project): DashboardProject {
     provider: project.provider,
     defaultBranch: project.default_branch,
     status: project.status,
+    workspaceMissing: project.workspace_missing,
     updatedLabel: formatRelativeTime(project.updated_at) ?? "Unknown",
   };
 }
