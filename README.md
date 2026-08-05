@@ -238,6 +238,20 @@ Leave the Variables tab **completely empty** — the worker injects
 fresh on every deploy. Anything set statically here becomes a stale fallback
 that can silently override a real run's values.
 
+There is no fixed value to write down for any of these — each one is
+computed per-run by `launch_project_on_railway()` in
+`graphify/server/sandbox.py` and only exists for that run's lifetime:
+
+| Variable | Where its value comes from |
+| --- | --- |
+| `REPO_URL` | The repo the user selected when starting the run — read off the `ExtractionRun` row |
+| `REPO_BRANCH` | The branch the user selected (defaults to `main`) — same row |
+| `REPO_TOKEN` | The logged-in user's own decrypted GitHub/GitLab OAuth token — only included for private repos, omitted entirely for public ones |
+| `GRAPHIFY_CALLBACK_URL` | `<BACKEND_URL>/api/internal/projects/<project_id>/runs/<run_id>/status` — static base + this run's IDs |
+| `GRAPHIFY_CALLBACK_SECRET` | A fresh random token (`secrets.token_urlsafe(48)`) generated new for this run; only its hash is stored, and the extractor echoes it back as the `X-Sandbox-Secret` header on every progress callback |
+| `<PROVIDER>_API_KEY` | The admin-configured LLM credential, decrypted from the database |
+| `WORKSPACE_STORAGE_TYPE` | Static worker config (`local` or `s3`), same on every run |
+
 **Settings → Deploy → Restart Policy: `Never`.** This is a batch job that
 exits when finished; the default restart policy treats a *successful* exit
 as a crash and re-runs the extraction in a loop. No public domain.

@@ -373,20 +373,22 @@ Vercel preview deployments each get their own web address, so they will not matc
 
 ## What the backend sends the job
 
-`launch_project_on_railway()` injects these env vars per deploy:
+`launch_project_on_railway()` injects these env vars per deploy. None of
+these are fixed values — every row below is computed fresh for that one run
+and only lives for its duration:
 
-| Variable | Purpose |
-| --- | --- |
-| `SERVICE_ROLE` | Always `extractor`; injected by the worker for this run |
-| `REPO_URL` | Repository to clone |
-| `PROJECT_ID` | Included in the progress callback URL |
-| `RUN_ID` | Immutable extraction attempt identity |
-| `REPO_BRANCH` | Branch to clone |
-| `REPO_TOKEN` | User's decrypted git token — only set for private repos |
-| `<PROVIDER>_API_KEY` | Admin-configured LLM key, e.g. `OPENAI_API_KEY` |
-| `GRAPHIFY_CALLBACK_URL` | Where to POST progress |
-| `GRAPHIFY_CALLBACK_SECRET` | Random per-run credential, sent back as `X-Sandbox-Secret` |
-| `WORKSPACE_STORAGE_TYPE` | `local` or `s3` |
+| Variable | Purpose | Where its value comes from |
+| --- | --- | --- |
+| `SERVICE_ROLE` | Always `extractor`; injected by the worker for this run | Hardcoded literal in `sandbox.py` |
+| `REPO_URL` | Repository to clone | The repo the user picked when starting the run — the `ExtractionRun.repo_url` DB column |
+| `PROJECT_ID` | Included in the progress callback URL | This run's project ID |
+| `RUN_ID` | Immutable extraction attempt identity | This run's own ID |
+| `REPO_BRANCH` | Branch to clone | The branch the user picked (defaults to `main`) — `ExtractionRun.default_branch` |
+| `REPO_TOKEN` | User's decrypted git token — only set for private repos | The launching user's own OAuth token, decrypted just for this run; omitted entirely for public repos |
+| `<PROVIDER>_API_KEY` | Admin-configured LLM key, e.g. `OPENAI_API_KEY` | The active `SystemCredential` row, decrypted per run |
+| `GRAPHIFY_CALLBACK_URL` | Where to POST progress | `<callback_base_url>/api/internal/projects/<project_id>/runs/<run_id>/status` — static base URL + this run's IDs |
+| `GRAPHIFY_CALLBACK_SECRET` | Random per-run credential, sent back as `X-Sandbox-Secret` | Freshly generated (`secrets.token_urlsafe(48)`) for this run alone; only its hash is persisted, so it can't be looked up or reused after the run ends |
+| `WORKSPACE_STORAGE_TYPE` | `local` or `s3` | Static worker config, same value every run |
 
 The job is expected to POST progress as it goes:
 
